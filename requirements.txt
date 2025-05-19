@@ -121,3 +121,5 @@ websockets==12.0
 
 # Added from the code block
 pyngrok==7.0.6 
+pydantic[email]==2.4.2
+python-multipart==0.0.6
