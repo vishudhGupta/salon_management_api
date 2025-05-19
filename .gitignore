@@ -1,0 +1,28 @@
+# Logs
+*.log
+*.log.*
+
+# Environment
+venv/
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE
+.vscode/
+.idea/
+
+# Database
+*.db
+*.sqlite3
+
+# Secrets
+*.pem
+*.key
+MONGODB_URL
+TWILIO_ACCOUNT_SID
+TWILIO_AUTH_TOKEN
