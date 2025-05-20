@@ -11,7 +11,7 @@ from routes import (
 )
 import uvicorn
 from fastapi.middleware.cors import CORSMiddleware
-from pyngrok import ngrok
+import os
 
 app = FastAPI(title="Salon Management System")
 # Initialize booking_service as None, will be set during startup
@@ -43,19 +43,6 @@ async def startup_db_client():
         # Initialize BookingService after database connection is established
         booking_service = BookingService()
         
-        # Start ngrok tunnel
-        try:
-            # Kill any existing tunnels
-            ngrok.kill()
-            
-            # Open a ngrok tunnel to the HTTP server
-            public_url = ngrok.connect(8000).public_url
-            print(f"ngrok tunnel established at: {public_url}")
-            print(f"Webhook URL for Twilio WhatsApp: {public_url}/webhook/whatsapp")
-        except Exception as e:
-            print(f"Failed to establish ngrok tunnel: {str(e)}")
-            print("Please make sure you have only one ngrok session running and your authentication token is valid.")
-            print("You can check your active tunnels at: https://dashboard.ngrok.com/cloud-edge/tunnels")
     except Exception as e:
         print(f"Error during startup: {str(e)}")
         raise
@@ -64,8 +51,6 @@ async def startup_db_client():
 async def shutdown_db_client():
     try:
         await Database.close_db()
-        # Close ngrok tunnel
-        ngrok.kill()
     except Exception as e:
         print(f"Error during shutdown: {str(e)}")
 
@@ -115,4 +100,5 @@ async def handle_appointment_response(request: Request):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
