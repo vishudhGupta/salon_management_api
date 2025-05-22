@@ -1,12 +1,22 @@
 from fastapi import APIRouter, HTTPException
 from typing import List
-from schemas.shop_owner import ShopOwnerCreate, ShopOwner
+from schemas.shop_owner import ShopOwnerCreate, ShopOwner, ShopOwnerLogin
 from crud import shop_owner_crud
 
 router = APIRouter(
     prefix="/shop-owners",
     tags=["shop-owners"]
 )
+
+@router.post("/login", response_model=ShopOwner)
+async def login_shop_owner(login_data: ShopOwnerLogin):
+    shop_owner = await shop_owner_crud.login_shop_owner(login_data)
+    if not shop_owner:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid email or password"
+        )
+    return shop_owner
 
 @router.post("/", response_model=ShopOwner)
 async def create_shop_owner(shop_owner: ShopOwnerCreate):

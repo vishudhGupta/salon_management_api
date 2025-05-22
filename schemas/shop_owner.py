@@ -20,6 +20,10 @@ class ShopOwnerBase(BaseModel):
 class ShopOwnerCreate(ShopOwnerBase):
     pass
 
+class ShopOwnerLogin(BaseModel):
+    email: EmailStr
+    password: SecretStr
+
 class ShopOwner(ShopOwnerBase):
     shop_owner_id: str
     salons: List[str] = []  # This will store salon IDs

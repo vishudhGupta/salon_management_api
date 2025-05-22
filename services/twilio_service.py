@@ -1,7 +1,7 @@
 from twilio.rest import Client
 from twilio.base.exceptions import TwilioRestException
 from datetime import datetime, timedelta
-from typing import Optional, List
+from typing import Optional, List,Dict
 import os
 import re
 from dotenv import load_dotenv
@@ -62,11 +62,7 @@ class TwilioService:
         message = (
             "Let's get you registered! 📝\n\n"
             "Please provide your details in exactly this format:\n\n"
-            "Name: Your Name\n"
-            "Email: your.email@example.com\n"
-            "Address: Your Address\n"
-            "Password: YourPassword123\n\n"
-            "Note: Password must be at least 8 characters long."
+            "Start by entering your name"
         )
         await self.send_sms(to_number, message)
 

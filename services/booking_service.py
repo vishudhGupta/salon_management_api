@@ -19,6 +19,77 @@ class BookingService:
         self.retry_counts: Dict[str, int] = {}  # phone_number -> retry count
         self.db = Database()
 
+    async def _handle_registration_state(self, phone_number: str, message: str) -> Dict:
+        state = self.user_states.get(phone_number, {})
+        registration_data = state.get("registration_data", {})
+        step = state.get("registration_step", "name")
+
+        if step == "name":
+            registration_data["name"] = message.strip()
+            self.user_states[phone_number].update({
+                "registration_step": "email",
+                "registration_data": registration_data
+            })
+            await self.twilio_service.send_sms(phone_number, "Please enter your email:")
+            return {"status": "awaiting_email"}
+        
+        elif step == "email":
+            registration_data["email"] = message.strip()
+            self.user_states[phone_number].update({
+                "registration_step": "address",
+                "registration_data": registration_data
+            })
+            await self.twilio_service.send_sms(phone_number, "Please enter your address:")
+            return {"status": "awaiting_address"}
+
+        elif step == "address":
+            registration_data["address"] = message.strip()
+            self.user_states[phone_number].update({
+                "registration_step": "password",
+                "registration_data": registration_data
+            })
+            await self.twilio_service.send_sms(phone_number, "Please enter a password (minimum 8 characters):")
+            return {"status": "awaiting_password"}
+
+        elif step == "password":
+            if len(message.strip()) < 8:
+                await self.twilio_service.send_sms(phone_number, "❌ Password too short. Please enter at least 8 characters:")
+                return {"status": "invalid_password"}
+
+            registration_data["password"] = message.strip()
+
+            try:
+                user = UserCreate(
+                    name=registration_data["name"],
+                    email=registration_data["email"],
+                    phone_number=phone_number,
+                    address=registration_data["address"],
+                    password=registration_data["password"]
+                )
+                new_user = await create_user(user)
+
+                self.user_states[phone_number] = {
+                    "state": "salon_selection",
+                    "user_id": new_user.user_id,
+                    "last_message_time": datetime.now()
+                }
+
+                await self.twilio_service.send_sms(phone_number, f"🎉 Registration successful! Welcome {user.name}!")
+                return await self._show_salons(phone_number)
+
+            except Exception as e:
+                await self.twilio_service.send_sms(phone_number, "⚠️ Registration failed. Please try again later.")
+                self._reset_user_state(phone_number)
+                return {"status": "error", "message": str(e)}
+
+        else:
+            self._reset_user_state(phone_number)
+            await self.twilio_service.send_sms(phone_number, "Something went wrong. Please type 'hi' to start again.")
+            return {"status": "error", "message": "Unknown registration step"}
+
+
+    
+
     def _reset_user_state(self, phone_number: str) -> None:
         """Reset user state and retry count"""
         if phone_number in self.user_states:
@@ -216,126 +287,105 @@ class BookingService:
         )
         await self.twilio_service.send_sms(phone_number, message)
         return {"status": "success"}
-
+    
     async def _handle_registration_state(self, phone_number: str, message: str) -> Dict:
-        """Handle registration state"""
-        try:
-            # Parse registration details
-            lines = message.split('\n')
-            details = {}
-            for line in lines:
-                if ':' in line:
-                    key, value = line.split(':', 1)
-                    details[key.strip().lower()] = value.strip()
+        state = self.user_states.get(phone_number, {})
+        registration_data = state.get("registration_data", {})
+        step = state.get("registration_step", "name")
 
-            # Validate required fields
-            required_fields = ['name', 'email', 'address', 'password']
-            missing_fields = [field for field in required_fields if field not in details]
-            
-            if missing_fields:
-                if self._increment_retry(phone_number):
-                    self._reset_user_state(phone_number)
-                    await self.twilio_service.send_welcome_message(phone_number)
-                    return {"status": "error", "message": "Too many invalid attempts. Please start over."}
-                
-                error_msg = f"Missing required fields: {', '.join(missing_fields)}. Please provide all details:\n" + \
-                           "Name: [Your Name]\n" + \
-                           "Email: [Your Email]\n" + \
-                           "Address: [Your Address]\n" + \
-                           "Password: [Your Password]"
-                await self.twilio_service.send_sms(phone_number, error_msg)
-                return {"status": "error"}
+        if step == "name":
+            registration_data["name"] = message.strip()
+            self.user_states[phone_number].update({
+                "registration_step": "email",
+                "registration_data": registration_data
+            })
+            await self.twilio_service.send_sms(phone_number, "Please enter your email:")
+            return {"status": "awaiting_email"}
+        
+        elif step == "email":
+            registration_data["email"] = message.strip()
+            self.user_states[phone_number].update({
+                "registration_step": "address",
+                "registration_data": registration_data
+            })
+            await self.twilio_service.send_sms(phone_number, "Please enter your address:")
+            return {"status": "awaiting_address"}
 
-            # Validate password strength
-            password = details['password']
-            if len(password) < 8:
-                if self._increment_retry(phone_number):
-                    self._reset_user_state(phone_number)
-                    await self.twilio_service.send_welcome_message(phone_number)
-                    return {"status": "error", "message": "Too many invalid attempts. Please start over."}
-                
-                error_msg = "Password must be at least 8 characters long. Please try again with all details:\n" + \
-                           "Name: [Your Name]\n" + \
-                           "Email: [Your Email]\n" + \
-                           "Address: [Your Address]\n" + \
-                           "Password: [Your Password]"
-                await self.twilio_service.send_sms(phone_number, error_msg)
-                return {"status": "error"}
+        elif step == "address":
+            registration_data["address"] = message.strip()
+            self.user_states[phone_number].update({
+                "registration_step": "password",
+                "registration_data": registration_data
+            })
+            await self.twilio_service.send_sms(phone_number, "Please enter a password (minimum 8 characters):")
+            return {"status": "awaiting_password"}
+
+        elif step == "password":
+            if len(message.strip()) < 8:
+                await self.twilio_service.send_sms(phone_number, "❌ Password too short. Please enter at least 8 characters:")
+                return {"status": "invalid_password"}
+
+            registration_data["password"] = message.strip()
 
             try:
-                # Create new user
                 user = UserCreate(
-                    name=details['name'],
-                    email=details['email'],
+                    name=registration_data["name"],
+                    email=registration_data["email"],
                     phone_number=phone_number,
-                    address=details['address'],
-                    password=details['password']
+                    address=registration_data["address"],
+                    password=registration_data["password"]
                 )
                 new_user = await create_user(user)
-                
-                # Update user state
+
                 self.user_states[phone_number] = {
                     "state": "salon_selection",
                     "user_id": new_user.user_id,
                     "last_message_time": datetime.now()
                 }
-                
-                # Send success message and show salons
-                success_msg = f"Registration successful! Welcome {details['name']}!"
-                await self.twilio_service.send_sms(phone_number, success_msg)
-                return await self._show_salons(phone_number)
-                
-            except Exception as e:
-                error_msg = "Error creating user. Please try again with your details."
-                await self.twilio_service.send_sms(phone_number, error_msg)
-                return {"status": "error"}
 
-        except Exception as e:
-            if self._increment_retry(phone_number):
+                await self.twilio_service.send_sms(phone_number, f"🎉 Registration successful! Welcome {user.name}!")
+                return await self._show_salons(phone_number)
+
+            except Exception as e:
+                await self.twilio_service.send_sms(phone_number, "⚠️ Registration failed. Please try again later.")
                 self._reset_user_state(phone_number)
-                await self.twilio_service.send_welcome_message(phone_number)
-                return {"status": "error", "message": "Too many invalid attempts. Please start over."}
-            
-            error_msg = "Invalid format. Please provide your details in the format:\n" + \
-                       "Name: [Your Name]\n" + \
-                       "Email: [Your Email]\n" + \
-                       "Address: [Your Address]\n" + \
-                       "Password: [Your Password]"
-            await self.twilio_service.send_sms(phone_number, error_msg)
-            return {"status": "error"}
+                return {"status": "error", "message": str(e)}
+
+        else:
+            self._reset_user_state(phone_number)
+            await self.twilio_service.send_sms(phone_number, "Something went wrong. Please type 'hi' to start again.")
+            return {"status": "error", "message": "Unknown registration step"}
+
+
+    
 
     async def _show_salons(self, phone_number: str) -> Dict:
-        """Show available salons"""
         try:
             salons = await get_all_salons()
-            
             if not salons:
-                message = "No salons are available at the moment. Please try again later."
-                await self.twilio_service.send_sms(phone_number, message)
+                await self.twilio_service.send_sms(phone_number, "No salons are available at the moment.")
                 return {"status": "error", "message": "No salons available"}
 
-            # Store salons in user state
             self.user_states[phone_number]["salons"] = salons
-            
-            # Format salon list message
+
+            # Build WhatsApp list section
             message = "Please select a salon by typing its number:\n\n"
             for i, salon in enumerate(salons, 1):
                 message += f"{i}. {salon.name} - {salon.address}\n"
-
-            # Send salon list
             await self.twilio_service.send_sms(phone_number, message)
+
             return {"status": "success"}
-            
+
         except Exception as e:
-            error_msg = "Sorry, we're having trouble fetching the salon list. Please try again by sending 'hi'."
-            await self.twilio_service.send_sms(phone_number, error_msg)
+            await self.twilio_service.send_sms(phone_number, "Something went wrong. Please type 'hi' to start again.")
             self._reset_user_state(phone_number)
             return {"status": "error", "message": str(e)}
+
 
     async def _handle_salon_selection_state(self, phone_number: str, message: str) -> Dict:
         """Handle salon selection by the user"""
         try:
-            salon_index = int(message.strip()) - 1
+            salon_index = int(message.strip()) -1
             salons = self.user_states[phone_number].get("salons", [])
             
             if not salons:
