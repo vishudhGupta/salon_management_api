@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict
 from services.twilio_service import TwilioService
-from crud.user_crud import get_user_by_phone, create_user, update_user
+from crud.user_crud import get_user_by_phone, create_user, update_user, get_user
 from crud.salon_crud import get_salon, update_salon, get_all_salons, get_salon_services, get_salon_experts
 from crud.service_crud import get_service, get_all_services
 from crud.expert_crud import get_expert
