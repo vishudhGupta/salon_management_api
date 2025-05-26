@@ -31,15 +31,7 @@ class UserLogin(BaseModel):
             d['password'] = d['password'].get_secret_value()
         return d
 
-class UserDashboard(BaseModel):
-    user_id: str
-    name: str
-    email: EmailStr
-    phone_number: str
-    address: str
-    appointments: List[dict] = []
-    favorite_salons: List[str] = []
-    favorite_services: List[str] = []
+
 
 class SalonDashboard(BaseModel):
     salon_id: str

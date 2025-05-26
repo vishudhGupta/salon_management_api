@@ -2,8 +2,19 @@ from typing import List, Optional
 from schemas.salon import SalonCreate, Salon, generate_salon_id
 from config.database import Database
 import logging
+from bson import ObjectId
 
 logger = logging.getLogger(__name__)
+def clean_object_ids(obj):
+    """Recursively convert ObjectId to string in nested dicts/lists."""
+    if isinstance(obj, dict):
+        return {
+            key: clean_object_ids(str(value) if isinstance(value, ObjectId) else value)
+            for key, value in obj.items()
+        }
+    elif isinstance(obj, list):
+        return [clean_object_ids(item) for item in obj]
+    return obj
 
 async def create_salon(salon: SalonCreate) -> Salon:
     db = Database()  # Use the Database class directly since connect_db is already called
@@ -247,3 +258,50 @@ async def get_salon_experts(salon_id: str) -> List[str]:
     except Exception as e:
         logger.error(f"Error fetching experts for salon {salon_id}: {str(e)}", exc_info=True)
         raise Exception(f"Error fetching salon experts: {str(e)}") 
+    
+async def get_salon_dashboard(salon_id: str) -> Optional[dict]:
+    db = Database()
+
+    salon = await db.salons.find_one({"salon_id": salon_id})
+    if not salon:
+        return None
+
+    salon = clean_object(salon)
+
+    # Fetch services
+    service_ids = salon.get("services", [])
+    services_raw = await db.services.find({"service_id": {"$in": service_ids}}).to_list(None)
+    services = [clean_object(s) for s in services_raw]
+
+    # Fetch experts
+    expert_ids = salon.get("experts", [])
+    experts_raw = await db.experts.find({"expert_id": {"$in": expert_ids}}).to_list(None)
+    experts = [clean_object(e) for e in experts_raw]
+
+    # Fetch appointments related to the salon
+    appointments_raw = await db.appointments.find({"salon_id": salon_id}).to_list(None)
+
+    appointments = []
+    for appt in appointments_raw:
+        appt = clean_object(appt)
+
+        user = await db.users.find_one({"user_id": appt["user_id"]})
+        expert = await db.experts.find_one({"expert_id": appt["expert_id"]})
+        service = await db.services.find_one({"service_id": appt["service_id"]})
+
+        appt["user"] = clean_object(user)
+        appt["expert"] = clean_object(expert)
+        appt["service"] = clean_object(service)
+
+        appointments.append(appt)
+
+    # Fix rating and review defaults
+    salon["ratings"] = float(salon.get("ratings", 0.0)) if isinstance(salon.get("ratings"), (int, float)) else 0.0
+    salon["total_reviews"] = int(salon.get("total_reviews", 0))
+
+    salon["services"] = services
+    salon["experts"] = experts
+    salon["appointments"] = appointments
+    salon["ratings"] = float(salon.get("ratings", 0.0)) if isinstance(salon.get("ratings"), (int, float)) else 0.0
+    
+    return clean_object_ids(salon)

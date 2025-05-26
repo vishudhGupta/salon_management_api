@@ -1,6 +1,8 @@
 from fastapi import APIRouter, HTTPException
 from typing import List
-from schemas.user import UserCreate, User, UserLogin, UserDashboard
+from schemas.user import UserCreate, User, UserLogin
+from schemas.user_dashboard import UserDashboard
+
 from crud import user_crud
 
 router = APIRouter(
@@ -17,9 +19,9 @@ async def login_user(login_data: UserLogin):
 
 @router.get("/dashboard/{user_id}", response_model=UserDashboard)
 async def get_user_dashboard(user_id: str):
-    dashboard = await user_crud.get_user_dashboard(user_id)
+    dashboard = await user_crud.fetch_user_dashboard(user_id)
     if not dashboard:
-        raise HTTPException(status_code=404, detail="User dashboard not found")
+        raise HTTPException(status_code=404, detail="User dashboard not found") 
     return dashboard
 
 @router.post("/", response_model=User)

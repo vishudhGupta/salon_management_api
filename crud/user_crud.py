@@ -2,6 +2,8 @@ from typing import List, Optional
 from schemas.user import UserCreate, User, generate_user_id
 from config.database import Database
 from pydantic import SecretStr
+from fastapi import APIRouter, HTTPException
+
 
 async def create_user(user: UserCreate) -> User:
     db = Database()
@@ -54,3 +56,35 @@ async def get_all_users() -> List[User]:
     db = Database()
     users = await db.users.find().to_list(length=None)
     return [User(**{**user, 'password': SecretStr(user['password'])}) for user in users] 
+
+async def fetch_user_dashboard(user_id: str):
+    db = Database()
+
+    # Fetch the user
+    user = await db.users.find_one({"user_id": user_id})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    user.pop("password", None)
+
+    # Expand all appointments
+    appointment_ids = user.get("appointments", [])
+    appointments_raw = await db.appointments.find({
+        "appointment_id": {"$in": appointment_ids}
+    }).to_list(length=None)
+
+    enriched_appointments = []
+    for appt in appointments_raw:
+        expert = await db.experts.find_one({"expert_id": appt["expert_id"]})
+        salon = await db.salons.find_one({"salon_id": appt["salon_id"]})
+        service = await db.services.find_one({"service_id": appt["service_id"]})
+
+        appt["expert"] = expert
+        appt["salon"] = salon
+        appt["service"] = service
+
+        # Remove internal Mongo ID
+        appt.pop("_id", None)
+        enriched_appointments.append(appt)
+
+    user["appointments"] = enriched_appointments
+    return user
