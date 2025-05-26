@@ -10,6 +10,8 @@ class UserBase(BaseModel):
     phone_number: str
     address: str
     password: SecretStr  # Making password required again
+    type: str = "user"  # Default type is user, can be "shop_owner"
+    salon_ids: List[str] = []  # List of salon IDs associated with the user
 
     def dict(self, *args, **kwargs):
         d = super().dict(*args, **kwargs)
@@ -27,7 +29,7 @@ class UserLogin(BaseModel):
 
     def dict(self, *args, **kwargs):
         d = super().dict(*args, **kwargs)
-        if isinstance(d.get('password'), SecretStr):
+        if isinstance(d.get('password'), SecretStr): 
             d['password'] = d['password'].get_secret_value()
         return d
 
