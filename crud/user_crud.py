@@ -1,18 +1,26 @@
 from typing import List, Optional
-from schemas.user import UserCreate, User, generate_user_id
+from schemas.user import UserCreate, User, generate_user_id, UserLogin
 from config.database import Database
 from pydantic import SecretStr
 from fastapi import APIRouter, HTTPException
+from passlib.context import CryptContext
 
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 async def create_user(user: UserCreate) -> User:
     db = Database()
     user_id = generate_user_id(user.name)
     user_dict = user.dict()
+    
+    # Hash the password before storing
+    password = user_dict["password"]
+    user_dict["password"] = pwd_context.hash(password)
     user_dict["user_id"] = user_id
     user_dict["appointments"] = []
     
     await db.users.insert_one(user_dict)
+    # Convert password back to SecretStr for response
+    user_dict["password"] = SecretStr(password)
     return User(**user_dict)
 
 async def get_user(user_id: str) -> Optional[User]:
@@ -88,3 +96,33 @@ async def fetch_user_dashboard(user_id: str):
 
     user["appointments"] = enriched_appointments
     return user
+
+async def login_user(login_data: UserLogin) -> Optional[User]:
+    db = Database()
+    user = await db.users.find_one({"email": login_data.email})
+    if not user:
+        return None
+        
+    # Get the stored password
+    stored_password = user["password"]
+    input_password = login_data.password.get_secret_value()
+    
+    # Check if the stored password is already hashed
+    if isinstance(stored_password, str) and stored_password.startswith("$2b$"):
+        # Verify hashed password
+        if not pwd_context.verify(input_password, stored_password):
+            return None
+    else:
+        # Direct comparison for unhashed passwords (temporary during migration)
+        if input_password != stored_password:
+            return None
+        # Hash the password for future use
+        hashed_password = pwd_context.hash(input_password)
+        await db.users.update_one(
+            {"_id": user["_id"]},
+            {"$set": {"password": hashed_password}}
+        )
+    
+    # Convert the stored password back to SecretStr for the response
+    user['password'] = SecretStr(stored_password)
+    return User(**user)

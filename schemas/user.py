@@ -24,7 +24,7 @@ class UserCreate(UserBase):
     pass
 
 class UserLogin(BaseModel):
-    phone_number: str
+    email: EmailStr
     password: SecretStr
 
     def dict(self, *args, **kwargs):
@@ -50,7 +50,7 @@ class User(UserBase):
     appointments: List[str] = []  # This will store appointment IDs
 
     class Config:
-        orm_mode = True
+        from_attributes = True  # Updated from orm_mode = True for Pydantic V2
 
 def generate_user_id(name: str) -> str:
     # Remove special characters and spaces from name

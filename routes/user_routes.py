@@ -12,9 +12,12 @@ router = APIRouter(
 
 @router.post("/login", response_model=User)
 async def login_user(login_data: UserLogin):
-    user = await user_crud.get_user_by_phone(login_data.phone_number)
+    user = await user_crud.login_user(login_data)
     if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid email or password"
+        )
     return user
 
 @router.get("/dashboard/{user_id}", response_model=UserDashboard)
