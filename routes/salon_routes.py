@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends
 from typing import List
 from schemas.salon import Salon, SalonCreate
-from schemas.user import SalonDashboard
+from schemas.salon_dashbboard import SalonDashboard
 from crud import salon_crud
 from config.database import get_db
 from motor.motor_asyncio import AsyncIOMotorDatabase

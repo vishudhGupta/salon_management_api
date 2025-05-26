@@ -266,32 +266,32 @@ async def get_salon_dashboard(salon_id: str) -> Optional[dict]:
     if not salon:
         return None
 
-    salon = clean_object(salon)
+    salon = clean_object_ids(salon)
 
     # Fetch services
     service_ids = salon.get("services", [])
     services_raw = await db.services.find({"service_id": {"$in": service_ids}}).to_list(None)
-    services = [clean_object(s) for s in services_raw]
+    services = [clean_object_ids(s) for s in services_raw]
 
     # Fetch experts
     expert_ids = salon.get("experts", [])
     experts_raw = await db.experts.find({"expert_id": {"$in": expert_ids}}).to_list(None)
-    experts = [clean_object(e) for e in experts_raw]
+    experts = [clean_object_ids(e) for e in experts_raw]
 
     # Fetch appointments related to the salon
     appointments_raw = await db.appointments.find({"salon_id": salon_id}).to_list(None)
 
     appointments = []
     for appt in appointments_raw:
-        appt = clean_object(appt)
+        appt = clean_object_ids(appt)
 
         user = await db.users.find_one({"user_id": appt["user_id"]})
         expert = await db.experts.find_one({"expert_id": appt["expert_id"]})
         service = await db.services.find_one({"service_id": appt["service_id"]})
 
-        appt["user"] = clean_object(user)
-        appt["expert"] = clean_object(expert)
-        appt["service"] = clean_object(service)
+        appt["user"] = clean_object_ids(user)
+        appt["expert"] = clean_object_ids(expert)
+        appt["service"] = clean_object_ids(service)
 
         appointments.append(appt)
 
