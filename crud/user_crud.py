@@ -63,7 +63,7 @@ async def update_user(user_id: str, user_data: dict) -> Optional[User]:
 async def get_all_users() -> List[User]:
     db = Database()
     users = await db.users.find().to_list(length=None)
-    return [User(**{**user, 'password': SecretStr(user['password'])}) for user in users] 
+    return [User(**{**user, 'password': SecretStr(user['password'])}) for user in users]
 
 async def fetch_user_dashboard(user_id: str):
     db = Database()

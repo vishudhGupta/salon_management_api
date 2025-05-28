@@ -674,17 +674,24 @@ class BookingService:
             
             if 0 <= time_index < len(times):
                 selected_time = times[time_index]
-                # Validate state transition
-                if not self._validate_state_transition(self.user_states[phone_number]["state"], "confirmation"):
-                    self._reset_user_state(phone_number)
-                    error_msg = "Invalid state transition. Please try again by sending 'hi'."
-                    await self.twilio_service.send_sms(phone_number, error_msg)
-                    return {"status": "error", "message": "Invalid state transition"}
                 
-                self.user_states[phone_number].update({
-                    "state": "confirmation",
-                    "selected_time": selected_time
-                })
+                # Store the current service selection
+                state = self.user_states[phone_number]
+                current_service = {
+                    "salon": state["selected_salon"],
+                    "service": state["selected_service"],
+                    "expert": state["selected_expert"],
+                    "date": state["selected_date"],
+                    "time": selected_time
+                }
+                
+                # Initialize or update selected_services array
+                if "selected_services" not in state:
+                    state["selected_services"] = []
+                state["selected_services"].append(current_service)
+                
+                # Move to confirmation state
+                state["state"] = "confirmation"
                 return await self._show_confirmation(phone_number)
             else:
                 if self._increment_retry(phone_number):
@@ -716,19 +723,32 @@ class BookingService:
         """Show booking confirmation details"""
         try:
             state = self.user_states[phone_number]
-            salon = state["selected_salon"]
-            service = state["selected_service"]
-            expert = state["selected_expert"]
-            date = state["selected_date"]
-            time = state["selected_time"]
+            selected_services = state.get("selected_services", [])
+            
+            if not selected_services:
+                message = "No services selected. Please start over by sending 'hi'."
+                await self.twilio_service.send_sms(phone_number, message)
+                self._reset_user_state(phone_number)
+                return {"status": "error", "message": "No services selected"}
 
-            message = f"Please confirm your booking:\n\n" \
-                     f"Salon: {salon.name}\n" \
-                     f"Service: {service.name}\n" \
-                     f"Expert: {expert.name}\n" \
-                     f"Date: {date}\n" \
-                     f"Time: {time}\n\n" \
-                     f"Type 'confirm' to proceed or 'cancel' to start over."
+            # Build confirmation message
+            message = "Please confirm your booking:\n\n"
+            for i, service_data in enumerate(selected_services, 1):
+                message += f"Service {i}:\n"
+                message += f"Salon: {service_data['salon'].name}\n"
+                message += f"Service: {service_data['service'].name}\n"
+                message += f"Expert: {service_data['expert'].name}\n"
+                message += f"Date: {service_data['date']}\n"
+                message += f"Time: {service_data['time']}\n\n"
+
+            # Add options based on number of services selected
+            if len(selected_services) < 5:
+                message += "Type 'confirm' to proceed with booking\n"
+                message += "Type 'add more' to add another service\n"
+                message += "Type 'cancel' to start over"
+            else:
+                message += "Type 'confirm' to proceed with booking\n"
+                message += "Type 'cancel' to start over"
 
             await self.twilio_service.send_sms(phone_number, message)
             return {"status": "success"}
@@ -741,62 +761,72 @@ class BookingService:
     async def _handle_confirmation_state(self, phone_number: str, message: str) -> Dict:
         try:
             message = message.lower().strip()
+            state = self.user_states[phone_number]
+            selected_services = state.get("selected_services", [])
+
             if message == "confirm":
                 try:
-                    state = self.user_states[phone_number]
-                    
-                    # Parse date and time
-                    date_str = state['selected_date']
-                    time_str = state['selected_time']
-                    
-                    try:
+                    # Create all appointments
+                    created_appointments = []
+                    for service_data in selected_services:
                         # Create appointment data
-                        appointment_date = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+                        appointment_date = datetime.strptime(
+                            f"{service_data['date']} {service_data['time']}", 
+                            "%Y-%m-%d %H:%M"
+                        )
                         
                         # Create appointment
                         appointment = AppointmentCreate(
                             user_id=state["user_id"],
-                            salon_id=state["selected_salon"].salon_id,
-                            service_id=state["selected_service"].service_id,
-                            expert_id=state["selected_expert"].expert_id,
+                            salon_id=service_data["salon"].salon_id,
+                            service_id=service_data["service"].service_id,
+                            expert_id=service_data["expert"].expert_id,
                             appointment_date=appointment_date,
-                            appointment_time=time_str
+                            appointment_time=service_data["time"]
                         )
                         
                         # Save to database
                         created_appointment = await create_appointment(appointment)
+                        created_appointments.append(created_appointment)
                         
-                        # Send confirmation
-                        confirmation_message = (
-                            f"✅ Booking confirmed!\n\n"
-                            f"Salon: {state['selected_salon'].name}\n"
-                            f"Service: {state['selected_service'].name}\n"
-                            f"Expert: {state['selected_expert'].name}\n"
-                            f"Date: {date_str}\n"
-                            f"Time: {time_str}\n\n"
-                            f"We'll send you a reminder before your appointment."
+                        # Update salon's appointments array
+                        await self.db.salons.update_one(
+                            {"salon_id": service_data["salon"].salon_id},
+                            {"$addToSet": {"appointments": created_appointment.appointment_id}}
                         )
-                        
-                        await self.twilio_service.send_sms(phone_number, confirmation_message)
-                        self._reset_user_state(phone_number)
-                        return {"status": "success", "message": "Booking confirmed"}
-                        
-                    except Exception as e:
-                        error_msg = "Sorry, there was an error creating your appointment. Please try again by sending 'hi'."
-                        await self.twilio_service.send_sms(phone_number, error_msg)
-                        self._reset_user_state(phone_number)
-                        return {"status": "error", "message": str(e)}
+                    
+                    # Send confirmation
+                    confirmation_message = "✅ All bookings confirmed!\n\n"
+                    for i, service_data in enumerate(selected_services, 1):
+                        confirmation_message += f"Booking {i}:\n"
+                        confirmation_message += f"Salon: {service_data['salon'].name}\n"
+                        confirmation_message += f"Service: {service_data['service'].name}\n"
+                        confirmation_message += f"Expert: {service_data['expert'].name}\n"
+                        confirmation_message += f"Date: {service_data['date']}\n"
+                        confirmation_message += f"Time: {service_data['time']}\n\n"
+                    confirmation_message += "We'll send you reminders before your appointments."
+                    
+                    await self.twilio_service.send_sms(phone_number, confirmation_message)
+                    self._reset_user_state(phone_number)
+                    return {"status": "success", "message": "All bookings confirmed"}
                     
                 except Exception as e:
-                    error_msg = "Sorry, something went wrong with your booking. Please try again by sending 'hi'."
+                    error_msg = "Sorry, there was an error creating your appointments. Please try again by sending 'hi'."
                     await self.twilio_service.send_sms(phone_number, error_msg)
                     self._reset_user_state(phone_number)
                     return {"status": "error", "message": str(e)}
+
+            elif message == "add more" and len(selected_services) < 5:
+                # Reset to service selection state but keep the same salon
+                state["state"] = "service_selection"
+                return await self._show_services(phone_number)
+
             elif message == "cancel":
                 # Reset the state
                 self._reset_user_state(phone_number)
                 await self.twilio_service.send_sms(phone_number, "Booking cancelled. Send 'hi' to start over.")
                 return {"status": "success", "message": "Booking cancelled"}
+
             else:
                 if self._increment_retry(phone_number):
                     self._reset_user_state(phone_number)
@@ -804,9 +834,13 @@ class BookingService:
                     await self.twilio_service.send_sms(phone_number, error_msg)
                     return {"status": "error", "message": "Too many retries"}
                 
-                error_msg = "Please type 'confirm' to proceed or 'cancel' to start over."
+                error_msg = "Please type 'confirm' to proceed"
+                if len(selected_services) < 5:
+                    error_msg += ", 'add more' to add another service"
+                error_msg += ", or 'cancel' to start over."
                 await self.twilio_service.send_sms(phone_number, error_msg)
                 return {"status": "error", "message": "Invalid confirmation response"}
+
         except Exception as e:
             error_msg = "Sorry, something went wrong with your confirmation. Please try again by sending 'hi'."
             await self.twilio_service.send_sms(phone_number, error_msg)

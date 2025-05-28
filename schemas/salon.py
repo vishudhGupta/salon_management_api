@@ -1,5 +1,5 @@
-from pydantic import BaseModel, Field
-from typing import List, Optional
+from pydantic import BaseModel, Field, ConfigDict
+from typing import List, Optional, Union
 import re
 import random
 import string
@@ -21,34 +21,51 @@ class Appointment(BaseModel):
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 class SalonBase(BaseModel):
-    shop_owner_id: str
     address: str
     name: str
     phone_number: str
 
-class SalonCreate(SalonBase):
-    pass
-
-class Salon(SalonBase):
-    salon_id: str
-    services: List[str] = []  # This will store service IDs
-    experts: List[str] = []   # This will store expert IDs
-    appointments: List[Appointment] = []
-    ratings: List[Rating] = []
+class SalonCreate(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    
+    name: str
+    address: str
+    phone_number: Optional[str] = None
+    email: Optional[str] = None
+    services: List[str] = []
+    experts: List[str] = []
+    appointments: List[str] = []
+    ratings: Union[List[float], float] = 0.0
+    ratings_list: List[dict] = []
     average_rating: float = 0.0
     total_ratings: int = 0
 
-    class Config:
-        orm_mode = True
+class Salon(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    
+    salon_id: str
+    name: str
+    address: str
+    phone_number: Optional[str] = None
+    email: Optional[str] = None
+    services: List[str] = []
+    experts: List[str] = []
+    appointments: List[str] = []
+    ratings: Union[List[float], float] = 0.0
+    ratings_list: List[dict] = []
+    average_rating: float = 0.0
+    total_ratings: int = 0
+    created_at: datetime = datetime.now()
+    updated_at: datetime = datetime.now()
 
-def generate_salon_id(shop_owner_id: str) -> str:
-    # Take first 3 characters of the shop_owner_id
-    owner_part = shop_owner_id[:3]
-    
-    # Generate 4 random alphanumeric characters
+    def __init__(self, **data):
+        # Convert float ratings to list if needed
+        if isinstance(data.get('ratings'), float):
+            data['ratings'] = [data['ratings']] if data['ratings'] != 0.0 else []
+        super().__init__(**data)
+
+def generate_salon_id(name: str) -> str:
+    clean_name = ''.join(filter(str.isalnum, name.upper()))
+    base = clean_name[:3].ljust(3, 'X')
     random_part = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
-    
-    # Combine to create 7-character unique ID
-    salon_id = f"SL{owner_part}{random_part}"
-    
-    return salon_id 
+    return f"SL{base}{random_part}"

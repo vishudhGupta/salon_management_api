@@ -18,7 +18,7 @@ def clean_object_ids(obj):
 
 async def create_salon(salon: SalonCreate) -> Salon:
     db = Database()  # Use the Database class directly since connect_db is already called
-    salon_id = generate_salon_id(salon.shop_owner_id)
+    salon_id = generate_salon_id(salon.name)
     salon_dict = salon.dict()
     salon_dict["salon_id"] = salon_id
     salon_dict["services"] = []  # Initialize empty services array
@@ -30,12 +30,6 @@ async def create_salon(salon: SalonCreate) -> Salon:
     
     # Create the salon
     await db.salons.insert_one(salon_dict)
-    
-    # Update shop owner's salons array
-    await db.shop_owners.update_one(
-        {"shop_owner_id": salon.shop_owner_id},
-        {"$addToSet": {"salons": salon_id}}
-    )
     
     return Salon(**salon_dict)
 
@@ -95,20 +89,7 @@ async def get_salons_by_expert(expert_id: str) -> List[Salon]:
         logger.error(f"Error fetching salons by expert {expert_id}: {str(e)}", exc_info=True)
         raise Exception(f"Error fetching salons by expert: {str(e)}")
 
-async def get_salons_by_owner(shop_owner_id: str) -> List[Salon]:
-    try:
-        db = Database()
-        salons = await db.salons.find({"shop_owner_id": shop_owner_id}).to_list(length=None)
-        # Handle appointments by initializing them as empty lists
-        salon_list = []
-        for salon in salons:
-            if "appointments" in salon:
-                salon["appointments"] = []
-            salon_list.append(Salon(**salon))
-        return salon_list
-    except Exception as e:
-        logger.error(f"Error fetching salons by owner {shop_owner_id}: {str(e)}", exc_info=True)
-        raise Exception(f"Error fetching salons by owner: {str(e)}")
+
 
 async def update_salon(salon_id: str, salon_data: dict) -> Optional[Salon]:
     try:
