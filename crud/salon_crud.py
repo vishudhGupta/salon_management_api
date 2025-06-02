@@ -1,8 +1,15 @@
-from typing import List, Optional
-from schemas.salon import SalonCreate, Salon, generate_salon_id
+from typing import List, Optional, Dict, Any
+from schemas.salon import (
+    SalonCreate, Salon, generate_salon_id, SalonWorkingHours, 
+    TimeSlot, ExpertWorkingHours, Appointment
+)
 from config.database import Database
 import logging
 from bson import ObjectId
+from datetime import datetime, time, timedelta
+from copy import deepcopy
+from scripts.time_parse import deserialize_time_slots
+from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
 def clean_object_ids(obj):
@@ -125,12 +132,35 @@ async def get_all_salons() -> List[Salon]:
         # Convert to Salon objects, handling appointments properly
         salon_list = []
         for salon in salons:
-            # Convert appointment IDs to Appointment objects
-            if "appointments" in salon:
-                # For now, we'll just initialize empty appointments array
-                # In a real implementation, you would fetch the actual appointment data
-                salon["appointments"] = []
-            salon_list.append(Salon(**salon))
+            # Ensure required fields have default values
+            salon_data = {
+                "salon_id": salon.get("salon_id", ""),
+                "name": salon.get("name", ""),
+                "address": salon.get("address", ""),
+                "phone": salon.get("phone", ""),
+                "description": salon.get("description", ""),
+                "services": salon.get("services", []),
+                "experts": salon.get("experts", []),
+                "appointments": salon.get("appointments", []),
+                "average_rating": float(salon.get("average_rating", 0.0)),
+                "total_ratings": int(salon.get("total_ratings", 0)),
+                "created_at": salon.get("created_at", datetime.utcnow()),
+                "updated_at": salon.get("updated_at", datetime.utcnow())
+            }
+            
+            # Add working hours if they exist
+            if "working_hours" in salon:
+                salon_data["working_hours"] = salon["working_hours"]
+            
+            # Add expert working hours if they exist
+            if "expert_working_hours" in salon:
+                salon_data["expert_working_hours"] = salon["expert_working_hours"]
+            
+            try:
+                salon_list.append(Salon(**salon_data))
+            except Exception as e:
+                logger.error(f"Error converting salon data: {str(e)}")
+                continue
         
         return salon_list
     except Exception as e:
@@ -286,3 +316,130 @@ async def get_salon_dashboard(salon_id: str) -> Optional[dict]:
     salon["ratings"] = float(salon.get("ratings", 0.0)) if isinstance(salon.get("ratings"), (int, float)) else 0.0
     
     return clean_object_ids(salon)
+
+
+async def create_salon_working_hours(salon_id: str, working_hours: SalonWorkingHours) -> SalonWorkingHours:
+    """Create working hours for a salon"""
+    salon = await get_salon(salon_id)
+    if not salon:
+        raise HTTPException(status_code=404, detail="Salon not found")
+    
+    salon_working_hours = SalonWorkingHours(
+        salon_id=salon_id,
+        is_available=[True] * 7,  # Default to all days available
+        updated_at=datetime.utcnow()
+    )
+    
+    # Update in the salons collection
+    db = Database()
+    await db.salons.update_one(
+        {"salon_id": salon_id},
+        {"$set": {"working_hours": salon_working_hours.dict()}},
+        upsert=True
+    )
+    return salon_working_hours
+
+async def update_salon_working_hours(salon_id: str, working_hours: SalonWorkingHours) -> SalonWorkingHours:
+    """Update working hours for a salon"""
+    db = Database()
+    working_hours_dict = working_hours.dict()
+    working_hours_dict["updated_at"] = datetime.utcnow()
+    
+    await db.salons.update_one(
+        {"salon_id": salon_id},
+        {"$set": {"working_hours": working_hours_dict}},
+        upsert=True
+    )
+    return working_hours
+
+async def get_salon_working_hours(salon_id: str) -> Optional[SalonWorkingHours]:
+    """Get working hours for a salon"""
+    db = Database()
+    working_hours = await db.salons.find_one({"salon_id": salon_id})
+    if working_hours and "working_hours" in working_hours:
+        return SalonWorkingHours(**working_hours["working_hours"])
+    return None
+
+
+
+async def get_available_time_slots(salon_id: str, date: datetime) -> List[TimeSlot]:
+    """Get available time slots for a salon on a specific date"""
+    db = Database()
+    
+    # Get salon's working hours
+    working_hours = await get_salon_working_hours(salon_id)
+    if not working_hours:
+        return []
+    
+    # Get day of week (0 = Monday, 6 = Sunday)
+    day_of_week = date.weekday()
+    
+    # Check if salon is available on this day
+    if not working_hours.is_available[day_of_week]:
+        return []
+    
+    # If salon is available, return all time slots from 9 AM to 9 PM
+    slots = []
+    start_time = time(9, 0)  # 9 AM
+    end_time = time(21, 0)   # 9 PM
+    
+    current_time = start_time
+    while current_time < end_time:
+        slots.append(TimeSlot(
+            start_time=current_time,
+            end_time=time(current_time.hour + 1, current_time.minute)
+        ))
+        current_time = time(current_time.hour + 1, current_time.minute)
+    
+    return slots
+
+
+async def update_expert_working_hours(salon_id: str, expert_id: str, working_hours: ExpertWorkingHours) -> Optional[ExpertWorkingHours]:
+    """Update working hours for an expert in a salon"""
+    db = Database()
+    
+    # Deep copy to avoid mutation
+    working_hours_dict = deepcopy(working_hours.dict())
+    working_hours_dict["updated_at"] = datetime.utcnow()
+
+    # Update in MongoDB
+    result = await db.salons.update_one(
+        {"salon_id": salon_id},
+        {"$set": {f"expert_working_hours.{expert_id}": working_hours_dict}}
+    )
+
+    if result.modified_count:
+        return working_hours
+    return None
+
+
+async def get_expert_working_hours(salon_id: str, expert_id: str) -> Optional[ExpertWorkingHours]:
+    """Get working hours for an expert in a salon"""
+    db = Database()
+    salon = await db.salons.find_one({"salon_id": salon_id})
+    if salon and "expert_working_hours" in salon and expert_id in salon["expert_working_hours"]:
+        wh = salon["expert_working_hours"][expert_id]
+        return ExpertWorkingHours(**wh)
+    return None
+
+
+async def get_all_expert_working_hours(salon_id: str) -> Dict[str, ExpertWorkingHours]:
+    """Get working hours for all experts in a salon"""
+    db = Database()
+    salon = await db.salons.find_one({"salon_id": salon_id})
+    if salon and "expert_working_hours" in salon:
+        return {
+            expert_id: ExpertWorkingHours(**wh)
+            for expert_id, wh in salon["expert_working_hours"].items()
+        }
+    return {}
+
+
+async def remove_expert_working_hours(salon_id: str, expert_id: str) -> bool:
+    """Remove working hours for an expert from a salon"""
+    db = Database()
+    result = await db.salons.update_one(
+        {"salon_id": salon_id},
+        {"$unset": {f"expert_working_hours.{expert_id}": ""}}
+    )
+    return result.modified_count > 0

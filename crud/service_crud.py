@@ -4,6 +4,8 @@ from config.database import Database
 import re
 import random
 import string
+from datetime import datetime
+from bson import ObjectId
 
 def generate_service_id(name: str) -> str:
     # Remove special characters and spaces from name
@@ -21,58 +23,53 @@ def generate_service_id(name: str) -> str:
     return service_id
 
 async def create_service(service: ServiceCreate) -> Service:
+    """Create a new service"""
     db = Database()
-    service_id = generate_service_id(service.name)
-    
     service_dict = service.dict()
-    service_dict["service_id"] = service_id
+    service_dict["created_at"] = datetime.now()
+    service_dict["updated_at"] = datetime.now()
+    service_dict["service_id"] = generate_service_id(service.name)
     
-    # Insert service into database
-    await db.services.insert_one(service_dict)
+    result = await db.services.insert_one(service_dict)
+    service_dict["_id"] = result.inserted_id
     
     # Update salon's services array
     await db.salons.update_one(
         {"salon_id": service.salon_id},
-        {"$addToSet": {"services": service_id}}
+        {"$addToSet": {"services": service_dict["service_id"]}}
     )
     
     return Service(**service_dict)
 
 async def get_service(service_id: str) -> Optional[Service]:
+    """Get a service by ID"""
     db = Database()
     service = await db.services.find_one({"service_id": service_id})
-    return Service(**service) if service else None
+    if service:
+        return Service(**service)
+    return None
 
 async def get_salon_services(salon_id: str) -> List[Service]:
     db = Database()
     services = await db.services.find({"salon_id": salon_id}).to_list(length=None)
     return [Service(**service) for service in services]
 
-async def update_service(service_id: str, service: ServiceCreate) -> Optional[Service]:
+async def update_service(service_id: str, service_data: dict) -> Optional[Service]:
+    """Update a service with the provided data"""
     db = Database()
-    service_dict = service.dict()
+    # Add updated_at timestamp
+    service_data["updated_at"] = datetime.now()
     
-    # If salon_id is being changed, update both salons
-    old_service = await db.services.find_one({"service_id": service_id})
-    if old_service and old_service.get("salon_id") != service.salon_id:
-        # Remove from old salon
-        await db.salons.update_one(
-            {"salon_id": old_service["salon_id"]},
-            {"$pull": {"services": service_id}}
-        )
-        # Add to new salon
-        await db.salons.update_one(
-            {"salon_id": service.salon_id},
-            {"$addToSet": {"services": service_id}}
-        )
-    
+    # Update the service
     result = await db.services.update_one(
         {"service_id": service_id},
-        {"$set": service_dict}
+        {"$set": service_data}
     )
     
     if result.modified_count:
-        return await get_service(service_id)
+        # Get the updated service
+        updated_service = await get_service(service_id)
+        return updated_service
     return None
 
 async def delete_service(service_id: str) -> bool:
@@ -90,6 +87,13 @@ async def delete_service(service_id: str) -> bool:
     return False
 
 async def get_all_services() -> List[Service]:
+    """Get all services"""
     db = Database()
     services = await db.services.find().to_list(length=None)
+    return [Service(**service) for service in services]
+
+async def get_services_by_category(category: str) -> List[Service]:
+    """Get services by category"""
+    db = Database()
+    services = await db.services.find({"category": category}).to_list(length=None)
     return [Service(**service) for service in services] 

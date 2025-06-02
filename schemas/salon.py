@@ -1,9 +1,10 @@
-from pydantic import BaseModel, Field, ConfigDict
-from typing import List, Optional, Union
+from pydantic import BaseModel, Field, ConfigDict, field_validator
+from typing import List, Optional, Union, Dict
 import re
 import random
 import string
-from datetime import datetime
+from datetime import datetime, time
+from bson import ObjectId
 
 class Rating(BaseModel):
     user_id: str
@@ -14,58 +15,145 @@ class Rating(BaseModel):
 class Appointment(BaseModel):
     appointment_id: str
     user_id: str
+    salon_id: str
     service_id: str
     expert_id: str
-    date: datetime
-    status: str  # pending, confirmed, completed, cancelled
+    appointment_date: datetime
+    appointment_time: time
+    status: str
     created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
 
 class SalonBase(BaseModel):
-    address: str
-    name: str
-    phone_number: str
-
-class SalonCreate(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    
     name: str
     address: str
-    phone_number: Optional[str] = None
-    email: Optional[str] = None
-    services: List[str] = []
-    experts: List[str] = []
-    appointments: List[str] = []
-    ratings: Union[List[float], float] = 0.0
-    ratings_list: List[dict] = []
+    phone: str
+    description: Optional[str] = None
     average_rating: float = 0.0
     total_ratings: int = 0
 
-class Salon(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    
+class TimeSlot(BaseModel):
+    model_config = ConfigDict(
+        json_encoders={
+            time: lambda v: v.strftime("%H:%M")
+        }
+    )
+    start_time: time
+    end_time: time
+
+    @field_validator('start_time', 'end_time')
+    @classmethod
+    def remove_timezone(cls, v: time) -> time:
+        if v.tzinfo is not None:
+            return v.replace(tzinfo=None)
+        return v
+
+class BreakTime(BaseModel):
+    model_config = ConfigDict(
+        json_encoders={
+            time: lambda v: v.strftime("%H:%M")
+        }
+    )
+    start_time: time
+    end_time: time
+
+    @field_validator('start_time', 'end_time')
+    @classmethod
+    def remove_timezone(cls, v: time) -> time:
+        if v.tzinfo is not None:
+            return v.replace(tzinfo=None)
+        return v
+
+class DayWorkingHours(BaseModel):
+    model_config = ConfigDict(
+        json_encoders={
+            time: lambda v: v.strftime("%H:%M")
+        }
+    )
+    day_of_week: int  # 0-6 (Monday-Sunday)
+    time_slots: Optional[List[TimeSlot]] = None  # Optional, if None means available all day
+    break_time: Optional[List[BreakTime]] = None
+
+    def is_available(self, check_time: time) -> bool:
+        """Check if the given time is available on this day"""
+        # If no time slots defined, day is fully available except for break times
+        if not self.time_slots:
+            # Check if time falls in any break time
+            if self.break_time:
+                for break_slot in self.break_time:
+                    if break_slot.start_time <= check_time <= break_slot.end_time:
+                        return False
+            return True
+        
+        # Check if time falls in any available time slot
+        for slot in self.time_slots:
+            if slot.is_available and slot.start_time <= check_time <= slot.end_time:
+                # Check if time falls in any break time
+                if self.break_time:
+                    for break_slot in self.break_time:
+                        if break_slot.start_time <= check_time <= break_slot.end_time:
+                            return False
+                return True
+        return False
+
+class SalonWorkingHours(BaseModel):
     salon_id: str
-    name: str
-    address: str
-    phone_number: Optional[str] = None
-    email: Optional[str] = None
+    is_available: List[bool] = Field(
+        default_factory=lambda: [True] * 7,
+        description="Array of 7 booleans representing availability for each day of the week (Monday to Sunday)"
+    )
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+class ExpertWorkingHours(BaseModel):
+    model_config = ConfigDict(
+        json_encoders={
+            time: lambda v: v.strftime("%H:%M")
+        }
+    )
+    expert_id: str
+    break_days: List[int] = []  # List of days (0-6) when expert is not available
+    break_times: List[BreakTime] = []  # List of break times for each day
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    def is_available(self, day_of_week: int, check_time: time) -> bool:
+        # Check if the day is a break day
+        if day_of_week in self.break_days:
+            return False
+        
+        # Check if the time falls within any break time
+        for break_time in self.break_times:
+            if break_time.start_time <= check_time <= break_time.end_time:
+                return False
+        
+        # If no restrictions found, expert is available
+        return True
+
+class Salon(SalonBase):
+    salon_id: str
     services: List[str] = []
     experts: List[str] = []
     appointments: List[str] = []
-    ratings: Union[List[float], float] = 0.0
-    ratings_list: List[dict] = []
-    average_rating: float = 0.0
-    total_ratings: int = 0
-    created_at: datetime = datetime.now()
-    updated_at: datetime = datetime.now()
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    working_hours: Optional[SalonWorkingHours] = None
+    expert_working_hours: Dict[str, ExpertWorkingHours] = {}
 
-    def __init__(self, **data):
-        # Convert float ratings to list if needed
-        if isinstance(data.get('ratings'), float):
-            data['ratings'] = [data['ratings']] if data['ratings'] != 0.0 else []
-        super().__init__(**data)
+    class Config:
+        orm_mode = True
+
+class SalonCreate(SalonBase):
+    pass
+
+class SalonUpdate(SalonBase):
+    pass
 
 def generate_salon_id(name: str) -> str:
-    clean_name = ''.join(filter(str.isalnum, name.upper()))
-    base = clean_name[:3].ljust(3, 'X')
-    random_part = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
-    return f"SL{base}{random_part}"
+    """Generate a unique salon ID based on the salon name"""
+    # Remove special characters and spaces, convert to uppercase
+    clean_name = ''.join(c for c in name if c.isalnum()).upper()
+    # Take first 3 characters
+    prefix = clean_name[:3] if len(clean_name) >= 3 else clean_name.ljust(3, 'X')
+    # Add random 3 digits
+    import random
+    suffix = ''.join(random.choices('0123456789', k=3))
+    return f"SALON{prefix}{suffix}"
