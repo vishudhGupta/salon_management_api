@@ -1,9 +1,11 @@
 from typing import List, Optional
-from schemas.user import UserCreate, User, generate_user_id, UserLogin
+from schemas.user import UserCreate, User, generate_user_id, UserLogin, UserBase
+from schemas.user_dashboard import UserDashboard
 from config.database import Database
-from pydantic import SecretStr
+from pydantic import SecretStr, EmailStr
 from fastapi import APIRouter, HTTPException
 from passlib.context import CryptContext
+from datetime import datetime
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -63,9 +65,33 @@ async def update_user(user_id: str, user_data: dict) -> Optional[User]:
 async def get_all_users() -> List[User]:
     db = Database()
     users = await db.users.find().to_list(length=None)
-    return [User(**{**user, 'password': SecretStr(user['password'])}) for user in users]
+    validated_users = []
+    
+    for user in users:
+        try:
+            # Create a temporary UserBase instance to validate email
+            temp_user = UserBase(
+                name=user["name"],
+                email=user["email"],
+                phone_number=user["phone_number"],
+                address=user["address"],
+                password=SecretStr("dummy")  # Dummy password for validation
+            )
+            # If validation succeeds, use the original user data
+            validated_users.append(User(**{**user, 'password': SecretStr(user['password'])}))
+        except ValueError:
+            # If email is invalid, create a placeholder email
+            user["email"] = f"{user['user_id']}@placeholder.com"
+            # Update the user's email in the database
+            await db.users.update_one(
+                {"user_id": user["user_id"]},
+                {"$set": {"email": user["email"]}}
+            )
+            validated_users.append(User(**{**user, 'password': SecretStr(user['password'])}))
+    
+    return validated_users
 
-async def fetch_user_dashboard(user_id: str):
+async def fetch_user_dashboard(user_id: str) -> UserDashboard:
     db = Database()
 
     # Fetch the user
@@ -73,6 +99,26 @@ async def fetch_user_dashboard(user_id: str):
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     user.pop("password", None)
+
+    # Validate and format email
+    try:
+        # Create a temporary UserBase instance to validate email
+        temp_user = UserBase(
+            name=user["name"],
+            email=user["email"],
+            phone_number=user["phone_number"],
+            address=user["address"],
+            password=SecretStr("dummy")  # Dummy password for validation
+        )
+        email = temp_user.email
+    except ValueError:
+        # If email is invalid, use a placeholder email
+        email = f"{user['user_id']}@placeholder.com"
+        # Update the user's email in the database
+        await db.users.update_one(
+            {"user_id": user_id},
+            {"$set": {"email": email}}
+        )
 
     # Expand all appointments
     appointment_ids = user.get("appointments", [])
@@ -86,16 +132,48 @@ async def fetch_user_dashboard(user_id: str):
         salon = await db.salons.find_one({"salon_id": appt["salon_id"]})
         service = await db.services.find_one({"service_id": appt["service_id"]})
 
-        appt["expert"] = expert
-        appt["salon"] = salon
-        appt["service"] = service
+        if expert and salon and service:
+            enriched_appointments.append({
+                "appointment_id": appt["appointment_id"],
+                "appointment_date": appt["appointment_date"],
+                "appointment_time": appt["appointment_time"],
+                "status": appt["status"],
+                "expert_confirmed": appt.get("expert_confirmed", False),
+                "notes": appt.get("notes"),
+                "created_at": appt.get("created_at", datetime.now()),
+                "salon": {
+                    "salon_id": salon["salon_id"],
+                    "name": salon["name"],
+                    "address": salon.get("address")
+                },
+                "expert": {
+                    "expert_id": expert["expert_id"],
+                    "name": expert["name"],
+                    "phone": expert.get("phone"),
+                    "address": expert.get("address")
+                },
+                "service": {
+                    "service_id": service["service_id"],
+                    "name": service["name"],
+                    "description": service.get("description"),
+                    "cost": service["cost"],
+                    "duration": service["duration"]
+                }
+            })
 
-        # Remove internal Mongo ID
-        appt.pop("_id", None)
-        enriched_appointments.append(appt)
+    # Create UserDashboard instance
+    dashboard_data = UserDashboard(
+        user_id=user["user_id"],
+        name=user["name"],
+        email=email,  # Use the validated email
+        phone_number=user["phone_number"],
+        address=user["address"],
+        appointments=enriched_appointments,
+        favorite_salons=user.get("favorite_salons", []),
+        favorite_services=user.get("favorite_services", [])
+    )
 
-    user["appointments"] = enriched_appointments
-    return user
+    return dashboard_data
 
 async def login_user(login_data: UserLogin) -> Optional[User]:
     db = Database()

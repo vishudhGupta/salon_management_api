@@ -254,25 +254,16 @@ async def get_salon_services(salon_id: str) -> Optional[List[str]]:
 
 
 
-async def get_salon_experts(salon_id: str) -> Optional[List[Dict[str, str]]]:
-    salon = await get_salon(salon_id)
-    if not salon:
-        return None
-
-    expert_ids = salon.experts
-    if not expert_ids:
-        return []
-
-    expert_list = []
-    for expert_id in expert_ids:
-        expert = await get_expert(expert_id)
-        if expert:
-            expert_list.append({
-                "expert_id": expert.expert_id,
-                "name": expert.name
-            })
-
-    return expert_list
+async def get_salon_experts(salon_id: str) -> Optional[List[str]]:
+    """Get all experts for a salon"""
+    try:
+        salon = await get_salon(salon_id)
+        if not salon:
+            return None
+        return salon.experts
+    except Exception as e:
+        logger.error(f"Error getting salon experts: {str(e)}", exc_info=True)
+        raise Exception(f"Error getting salon experts: {str(e)}")
 
 
 async def get_salon_dashboard(salon_id: str) -> Optional[dict]:

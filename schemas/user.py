@@ -9,7 +9,7 @@ class UserBase(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     
     name: str
-    email: str
+    email: EmailStr
     phone_number: str
     address: str
     password: SecretStr
@@ -27,7 +27,7 @@ class UserCreate(UserBase):
 class UserLogin(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     
-    email: str
+    email: EmailStr
     password: SecretStr
 
     def dict(self, **kwargs):
@@ -54,10 +54,16 @@ class User(UserBase):
     updated_at: datetime = datetime.now()
 
 def generate_user_id(name: str) -> str:
-    # Remove special characters and spaces
-    clean_name = re.sub(r'[^a-zA-Z0-9]', '', name.lower())
-    # Take first 4 characters
-    prefix = clean_name[:4]
-    # Add timestamp
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    return f"{prefix}{timestamp}" 
+    # Remove special characters and spaces from name
+    clean_name = re.sub(r'[^a-zA-Z0-9]', '', name)
+    
+    # Take first 3 characters of the name (or pad with 'X' if shorter)
+    name_part = clean_name[:3].upper().ljust(3, 'X')
+    
+    # Generate 4 random alphanumeric characters
+    random_part = ''.join(random.choices(string.ascii_uppercase + string.digits, k=4))
+    
+    # Combine to create 7-character unique ID
+    user_id = f"AM{name_part}{random_part}"
+    
+    return user_id 
