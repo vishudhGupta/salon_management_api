@@ -302,23 +302,74 @@ async def get_salon_dashboard(salon_id: str) -> Optional[dict]:
                 experts.append({
                     "expert_id": expert.expert_id,
                     "name": expert.name,
+                    "phone": expert.phone if hasattr(expert, 'phone') else None,
                     "is_available": availability.is_available if availability else True,
                     "availability": availability.availability if availability else {
                         str(i): [True] * 13 for i in range(7)
                     }
                 })
         
-        # Get total services
-        total_services = len(salon.get("services", []))
+        # Get services
+        services = []
+        for service_id in salon.get("services", []):
+            service = await db.services.find_one({"service_id": service_id})
+            if service:
+                services.append({
+                    "service_id": service["service_id"],
+                    "name": service["name"],
+                    "cost": service["cost"],
+                    "duration": service["duration"]
+                })
+        
+        # Get appointments
+        appointments = []
+        salon_appointments = await db.appointments.find({"salon_id": salon_id}).to_list(length=None)
+        for apt in salon_appointments:
+            user = await db.users.find_one({"user_id": apt["user_id"]})
+            service = await db.services.find_one({"service_id": apt["service_id"]})
+            expert = await db.experts.find_one({"expert_id": apt["expert_id"]})
+            
+            if user and service and expert:
+                # Convert appointment time from 12-hour to 24-hour format
+                try:
+                    time_obj = datetime.strptime(apt["appointment_time"], "%I:%M %p")
+                    formatted_time = time_obj.strftime("%H:%M")
+                except ValueError:
+                    # If time is already in 24-hour format, use it as is
+                    formatted_time = apt["appointment_time"]
+                
+                appointments.append({
+                    "appointment_id": apt["appointment_id"],
+                    "appointment_date": apt["appointment_date"],
+                    "appointment_time": formatted_time,
+                    "status": apt["status"],
+                    "user": {
+                        "user_id": user["user_id"],
+                        "name": user["name"],
+                        "phone_number": user["phone_number"]
+                    },
+                    "service": {
+                        "service_id": service["service_id"],
+                        "name": service["name"],
+                        "cost": service["cost"],
+                        "duration": service["duration"]
+                    },
+                    "expert": {
+                        "expert_id": expert["expert_id"],
+                        "name": expert["name"],
+                        "phone": expert.get("phone")
+                    }
+                })
         
         return {
-            "total_appointments": total_appointments,
-            "total_revenue": total_revenue,
-            "total_experts": len(experts),
-            "total_services": total_services,
-            "average_rating": salon.get("average_rating", 0),
-            "total_ratings": salon.get("total_ratings", 0),
-            "experts": experts  # Added experts with their availability
+            "salon_id": salon_id,
+            "name": salon["name"],
+            "address": salon["address"],
+            "services": services,
+            "experts": experts,
+            "appointments": appointments,
+            "ratings": salon.get("average_rating", 0.0),
+            "total_reviews": salon.get("total_ratings", 0)
         }
     except Exception as e:
         logger.error(f"Error getting salon dashboard: {str(e)}", exc_info=True)
