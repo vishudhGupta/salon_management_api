@@ -23,7 +23,7 @@ class ServiceInfo(BaseModel):
 class AppointmentInfo(BaseModel):
     appointment_id: str
     appointment_date: datetime
-    appointment_time: time
+    appointment_time: str
     status: str
     expert_confirmed: bool
     notes: Optional[str]

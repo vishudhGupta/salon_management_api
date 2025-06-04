@@ -1,7 +1,7 @@
 from datetime import datetime, time
 
 def parse_time_str(t: str) -> time:
-    return datetime.strptime(t, "%H:%M").time()
+    return datetime.strptime(t, "%I:%M %p").time()
 
 def deserialize_time_slots(day: dict) -> dict:
     for slot in day.get("time_slots", []):

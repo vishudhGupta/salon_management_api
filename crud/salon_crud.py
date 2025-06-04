@@ -1,7 +1,7 @@
 from typing import List, Optional, Dict, Any
 from schemas.salon import (
-    SalonCreate, Salon, generate_salon_id, SalonWorkingHours, 
-    TimeSlot, ExpertWorkingHours, Appointment
+    SalonCreate, Salon, SalonUpdate, generate_salon_id,
+    TimeSlot, Appointment, ExpertAvailability
 )
 from config.database import Database
 import logging
@@ -10,6 +10,7 @@ from datetime import datetime, time, timedelta
 from copy import deepcopy
 from scripts.time_parse import deserialize_time_slots
 from fastapi import HTTPException
+from crud.expert_crud import get_expert, get_experts_by_salon
 
 logger = logging.getLogger(__name__)
 def clean_object_ids(obj):
@@ -240,206 +241,219 @@ async def remove_expert_from_salon(salon_id: str, expert_id: str) -> Optional[Sa
         logger.error(f"Error removing expert {expert_id} from salon {salon_id}: {str(e)}", exc_info=True)
         raise Exception(f"Error removing expert from salon: {str(e)}")
 
-async def get_salon_services(salon_id: str) -> List[str]:
-    """Get all services for a specific salon"""
+async def get_salon_services(salon_id: str) -> Optional[List[str]]:
+    """Get all services for a salon"""
     try:
-        db = Database()
-        logger.info(f"Fetching services for salon {salon_id}")
-        salon = await db.salons.find_one({"salon_id": salon_id})
-        if salon and "services" in salon:
-            logger.info(f"Found {len(salon['services'])} services for salon {salon_id}")
-            return salon["services"]
-        logger.warning(f"No services found for salon {salon_id}")
-        return []
+        salon = await get_salon(salon_id)
+        if not salon:
+            return None
+        return salon.services
     except Exception as e:
-        logger.error(f"Error fetching services for salon {salon_id}: {str(e)}", exc_info=True)
-        raise Exception(f"Error fetching salon services: {str(e)}")
+        logger.error(f"Error getting salon services: {str(e)}", exc_info=True)
+        raise Exception(f"Error getting salon services: {str(e)}")
 
-async def get_salon_experts(salon_id: str) -> List[str]:
-    """Get all experts for a specific salon"""
-    try:
-        db = Database()
-        logger.info(f"Fetching experts for salon {salon_id}")
-        salon = await db.salons.find_one({"salon_id": salon_id})
-        if salon and "experts" in salon:
-            logger.info(f"Found {len(salon['experts'])} experts for salon {salon_id}")
-            return salon["experts"]
-        logger.warning(f"No experts found for salon {salon_id}")
-        return []
-    except Exception as e:
-        logger.error(f"Error fetching experts for salon {salon_id}: {str(e)}", exc_info=True)
-        raise Exception(f"Error fetching salon experts: {str(e)}") 
-    
-async def get_salon_dashboard(salon_id: str) -> Optional[dict]:
-    db = Database()
 
-    salon = await db.salons.find_one({"salon_id": salon_id})
+
+async def get_salon_experts(salon_id: str) -> Optional[List[Dict[str, str]]]:
+    salon = await get_salon(salon_id)
     if not salon:
         return None
 
-    salon = clean_object_ids(salon)
-
-    # Fetch services
-    service_ids = salon.get("services", [])
-    services_raw = await db.services.find({"service_id": {"$in": service_ids}}).to_list(None)
-    services = [clean_object_ids(s) for s in services_raw]
-
-    # Fetch experts
-    expert_ids = salon.get("experts", [])
-    experts_raw = await db.experts.find({"expert_id": {"$in": expert_ids}}).to_list(None)
-    experts = [clean_object_ids(e) for e in experts_raw]
-
-    # Fetch appointments related to the salon
-    appointments_raw = await db.appointments.find({"salon_id": salon_id}).to_list(None)
-
-    appointments = []
-    for appt in appointments_raw:
-        appt = clean_object_ids(appt)
-
-        user = await db.users.find_one({"user_id": appt["user_id"]})
-        expert = await db.experts.find_one({"expert_id": appt["expert_id"]})
-        service = await db.services.find_one({"service_id": appt["service_id"]})
-
-        appt["user"] = clean_object_ids(user)
-        appt["expert"] = clean_object_ids(expert)
-        appt["service"] = clean_object_ids(service)
-
-        appointments.append(appt)
-
-    # Fix rating and review defaults
-    salon["ratings"] = float(salon.get("ratings", 0.0)) if isinstance(salon.get("ratings"), (int, float)) else 0.0
-    salon["total_reviews"] = int(salon.get("total_reviews", 0))
-
-    salon["services"] = services
-    salon["experts"] = experts
-    salon["appointments"] = appointments
-    salon["ratings"] = float(salon.get("ratings", 0.0)) if isinstance(salon.get("ratings"), (int, float)) else 0.0
-    
-    return clean_object_ids(salon)
-
-
-async def create_salon_working_hours(salon_id: str, working_hours: SalonWorkingHours) -> SalonWorkingHours:
-    """Create working hours for a salon"""
-    salon = await get_salon(salon_id)
-    if not salon:
-        raise HTTPException(status_code=404, detail="Salon not found")
-    
-    salon_working_hours = SalonWorkingHours(
-        salon_id=salon_id,
-        is_available=[True] * 7,  # Default to all days available
-        updated_at=datetime.utcnow()
-    )
-    
-    # Update in the salons collection
-    db = Database()
-    await db.salons.update_one(
-        {"salon_id": salon_id},
-        {"$set": {"working_hours": salon_working_hours.dict()}},
-        upsert=True
-    )
-    return salon_working_hours
-
-async def update_salon_working_hours(salon_id: str, working_hours: SalonWorkingHours) -> SalonWorkingHours:
-    """Update working hours for a salon"""
-    db = Database()
-    working_hours_dict = working_hours.dict()
-    working_hours_dict["updated_at"] = datetime.utcnow()
-    
-    await db.salons.update_one(
-        {"salon_id": salon_id},
-        {"$set": {"working_hours": working_hours_dict}},
-        upsert=True
-    )
-    return working_hours
-
-async def get_salon_working_hours(salon_id: str) -> Optional[SalonWorkingHours]:
-    """Get working hours for a salon"""
-    db = Database()
-    working_hours = await db.salons.find_one({"salon_id": salon_id})
-    if working_hours and "working_hours" in working_hours:
-        return SalonWorkingHours(**working_hours["working_hours"])
-    return None
-
-
-
-async def get_available_time_slots(salon_id: str, date: datetime) -> List[TimeSlot]:
-    """Get available time slots for a salon on a specific date"""
-    db = Database()
-    
-    # Get salon's working hours
-    working_hours = await get_salon_working_hours(salon_id)
-    if not working_hours:
+    expert_ids = salon.experts
+    if not expert_ids:
         return []
-    
-    # Get day of week (0 = Monday, 6 = Sunday)
-    day_of_week = date.weekday()
-    
-    # Check if salon is available on this day
-    if not working_hours.is_available[day_of_week]:
-        return []
-    
-    # If salon is available, return all time slots from 9 AM to 9 PM
-    slots = []
-    start_time = time(9, 0)  # 9 AM
-    end_time = time(21, 0)   # 9 PM
-    
-    current_time = start_time
-    while current_time < end_time:
-        slots.append(TimeSlot(
-            start_time=current_time,
-            end_time=time(current_time.hour + 1, current_time.minute)
-        ))
-        current_time = time(current_time.hour + 1, current_time.minute)
-    
-    return slots
+
+    expert_list = []
+    for expert_id in expert_ids:
+        expert = await get_expert(expert_id)
+        if expert:
+            expert_list.append({
+                "expert_id": expert.expert_id,
+                "name": expert.name
+            })
+
+    return expert_list
 
 
-async def update_expert_working_hours(salon_id: str, expert_id: str, working_hours: ExpertWorkingHours) -> Optional[ExpertWorkingHours]:
-    """Update working hours for an expert in a salon"""
-    db = Database()
-    
-    # Deep copy to avoid mutation
-    working_hours_dict = deepcopy(working_hours.dict())
-    working_hours_dict["updated_at"] = datetime.utcnow()
-
-    # Update in MongoDB
-    result = await db.salons.update_one(
-        {"salon_id": salon_id},
-        {"$set": {f"expert_working_hours.{expert_id}": working_hours_dict}}
-    )
-
-    if result.modified_count:
-        return working_hours
-    return None
-
-
-async def get_expert_working_hours(salon_id: str, expert_id: str) -> Optional[ExpertWorkingHours]:
-    """Get working hours for an expert in a salon"""
-    db = Database()
-    salon = await db.salons.find_one({"salon_id": salon_id})
-    if salon and "expert_working_hours" in salon and expert_id in salon["expert_working_hours"]:
-        wh = salon["expert_working_hours"][expert_id]
-        return ExpertWorkingHours(**wh)
-    return None
-
-
-async def get_all_expert_working_hours(salon_id: str) -> Dict[str, ExpertWorkingHours]:
-    """Get working hours for all experts in a salon"""
-    db = Database()
-    salon = await db.salons.find_one({"salon_id": salon_id})
-    if salon and "expert_working_hours" in salon:
+async def get_salon_dashboard(salon_id: str) -> Optional[dict]:
+    """Get salon dashboard data"""
+    try:
+        db = Database()
+        salon = await db.salons.find_one({"salon_id": salon_id})
+        if not salon:
+            return None
+        
+        # Get total appointments
+        total_appointments = await db.appointments.count_documents({"salon_id": salon_id})
+        
+        # Get total revenue
+        revenue = await db.appointments.aggregate([
+            {"$match": {"salon_id": salon_id}},
+            {"$group": {"_id": None, "total": {"$sum": "$amount"}}}
+        ]).to_list(1)
+        total_revenue = revenue[0]["total"] if revenue else 0
+        
+        # Get experts with their availability
+        experts = []
+        for expert_id in salon.get("experts", []):
+            expert = await get_expert(expert_id)
+            if expert:
+                availability = await get_expert_availability(salon_id, expert_id)
+                experts.append({
+                    "expert_id": expert.expert_id,
+                    "name": expert.name,
+                    "is_available": availability.is_available if availability else True,
+                    "availability": availability.availability if availability else {
+                        str(i): [True] * 13 for i in range(7)
+                    }
+                })
+        
+        # Get total services
+        total_services = len(salon.get("services", []))
+        
         return {
-            expert_id: ExpertWorkingHours(**wh)
-            for expert_id, wh in salon["expert_working_hours"].items()
+            "total_appointments": total_appointments,
+            "total_revenue": total_revenue,
+            "total_experts": len(experts),
+            "total_services": total_services,
+            "average_rating": salon.get("average_rating", 0),
+            "total_ratings": salon.get("total_ratings", 0),
+            "experts": experts  # Added experts with their availability
         }
-    return {}
+    except Exception as e:
+        logger.error(f"Error getting salon dashboard: {str(e)}", exc_info=True)
+        raise Exception(f"Error getting salon dashboard: {str(e)}")
+
+async def get_available_time_slots(salon_id: str, date: datetime, db: Database) -> List[TimeSlot]:
+    """Get available time slots for a salon on a specific date"""
+    try:
+        # Initialize time slots from 9am to 9pm
+        time_slots = []
+        for hour in range(9, 21):  # 9 to 20 gives slots till 9PM
+            time_slots.append(TimeSlot(
+                start_time=time(hour, 0),
+                end_time=time(hour + 1, 0),
+                is_available=True
+            ))
+
+        # Get salon
+        salon = await get_salon(salon_id)
+        if not salon:
+            return []
+
+        # Get experts
+        experts = await get_experts_by_salon(salon_id)
+        if not experts:
+            return []
+
+        # Check slot availability
+        for slot in time_slots:
+            slot_available = False
+            for expert in experts:
+                hour_index = slot.start_time.hour - 9
+                if hour_index < len(expert.availability) and expert.availability[hour_index]:
+                    appointment = await db.appointments.find_one({
+                        "salon_id": salon_id,
+                        "expert_id": expert.expert_id,
+                        "appointment_date": date,
+                        "appointment_time": slot.start_time.strftime("%I:%M %p")
+                    })
+                    if not appointment:
+                        slot_available = True
+                        break
+            slot.is_available = slot_available
+
+        return [slot for slot in time_slots if slot.is_available]
+
+    except Exception as e:
+        logger.error(f"Error getting available time slots: {str(e)}", exc_info=True)
+        raise Exception(f"Error getting available time slots: {str(e)}")
 
 
-async def remove_expert_working_hours(salon_id: str, expert_id: str) -> bool:
-    """Remove working hours for an expert from a salon"""
-    db = Database()
-    result = await db.salons.update_one(
-        {"salon_id": salon_id},
-        {"$unset": {f"expert_working_hours.{expert_id}": ""}}
-    )
-    return result.modified_count > 0
+
+async def get_expert_availability(salon_id: str, expert_id: str) -> Optional[ExpertAvailability]:
+    """Get an expert's availability"""
+    try:
+        db = Database()
+        # Get availability directly from expert_availability collection
+        availability_doc = await db.expert_availability.find_one({
+            "expert_id": expert_id,
+            "salon_id": salon_id
+        })
+        
+        if not availability_doc:
+            # If no availability document exists, create one with default availability
+            availability_doc = {
+                "expert_id": expert_id,
+                "salon_id": salon_id,
+                "is_available": True,
+                "availability": {
+                    "0": [True] * 13,  # Sunday
+                    "1": [True] * 13,  # Monday
+                    "2": [True] * 13,  # Tuesday
+                    "3": [True] * 13,  # Wednesday
+                    "4": [True] * 13,  # Thursday
+                    "5": [True] * 13,  # Friday
+                    "6": [True] * 13   # Saturday
+                }
+            }
+            await db.expert_availability.insert_one(availability_doc)
+        
+        return ExpertAvailability(**availability_doc)
+    except Exception as e:
+        logger.error(f"Error getting expert availability: {str(e)}", exc_info=True)
+        raise Exception(f"Error getting expert availability: {str(e)}")
+
+async def update_expert_availability(salon_id: str, expert_id: str, weekday: str, availability: List[bool]) -> bool:
+    """Update an expert's availability for a specific weekday"""
+    try:
+        if len(availability) != 13:
+            return False
+            
+        if weekday not in ["0", "1", "2", "3", "4", "5", "6"]:
+            return False
+        
+        db = Database()
+        
+        # Get current availability document
+        availability_doc = await db.expert_availability.find_one({
+            "expert_id": expert_id,
+            "salon_id": salon_id
+        })
+        
+        if not availability_doc:
+            # Create new availability document if it doesn't exist
+            availability_doc = {
+                "expert_id": expert_id,
+                "salon_id": salon_id,
+                "is_available": True,
+                "availability": {
+                    "0": [True] * 13,  # Sunday
+                    "1": [True] * 13,  # Monday
+                    "2": [True] * 13,  # Tuesday
+                    "3": [True] * 13,  # Wednesday
+                    "4": [True] * 13,  # Thursday
+                    "5": [True] * 13,  # Friday
+                    "6": [True] * 13   # Saturday
+                }
+            }
+        
+        # Update availability for the specific weekday
+        availability_doc["availability"][weekday] = availability
+        
+        # Update is_available based on if any day has any available slots
+        availability_doc["is_available"] = any(
+            any(slots) for slots in availability_doc["availability"].values()
+        )
+        
+        # Update in expert_availability collection
+        result = await db.expert_availability.update_one(
+            {"expert_id": expert_id, "salon_id": salon_id},
+            {"$set": availability_doc},
+            upsert=True
+        )
+        
+        return result.modified_count > 0 or result.upserted_id is not None
+    except Exception as e:
+        logger.error(f"Error updating expert availability: {str(e)}", exc_info=True)
+        raise Exception(f"Error updating expert availability: {str(e)}")

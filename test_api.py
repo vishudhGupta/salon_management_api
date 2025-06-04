@@ -73,13 +73,14 @@ def test_shop_owner_apis(user_id):
     
     return shop_owner_id
 
-def test_salon_apis(shop_owner_id):
+def test_salon_apis():
     print("\n=== Testing Salon APIs ===")
     
     # Create salon
     salon_data = {
-        "shop_owner_id": shop_owner_id,
-        "address": "456 Salon St"
+        "name": "Test Salon",
+        "address": "456 Salon St",
+        "phone": "1234567890"
     }
     response = requests.post(f"{BASE_URL}/salons/", json=salon_data)
     print("Create Salon:", response.status_code)
@@ -89,10 +90,6 @@ def test_salon_apis(shop_owner_id):
     # Get salon by ID
     response = requests.get(f"{BASE_URL}/salons/{salon_id}")
     print("Get Salon by ID:", response.status_code)
-    
-    # Get salons by owner
-    response = requests.get(f"{BASE_URL}/salons/owner/{shop_owner_id}")
-    print("Get Salons by Owner:", response.status_code)
     
     # Update salon
     update_data = {"address": "789 New Salon St"}
@@ -214,7 +211,7 @@ def main():
         # Test all APIs in sequence
         user_id = test_user_apis()
         shop_owner_id = test_shop_owner_apis(user_id)
-        salon_id = test_salon_apis(shop_owner_id)
+        salon_id = test_salon_apis()
         expert_id = test_expert_apis()
         service_id = test_service_apis()
         test_appointment_apis(user_id, salon_id, service_id)

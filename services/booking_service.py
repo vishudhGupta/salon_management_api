@@ -2,9 +2,9 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict
 from services.twilio_service import TwilioService
 from crud.user_crud import get_user_by_phone, create_user, update_user, get_user
-from crud.salon_crud import get_salon, update_salon, get_all_salons, get_salon_services, get_salon_experts
+from crud.salon_crud import get_salon, update_salon, get_all_salons, get_salon_services, get_salon_experts, get_expert_availability
 from crud.service_crud import get_service, get_all_services
-from crud.expert_crud import get_expert
+from crud.expert_crud import get_expert,get_expert_by_salon
 from crud.appointment_crud import create_appointment, update_appointment, get_appointment
 from schemas.user import UserCreate
 from schemas.salon import Appointment, TimeSlot
@@ -14,29 +14,61 @@ import re
 import httpx
 import logging
 
+TIME_LABELS = [
+    "09:00 AM", "10:00 AM", "11:00 AM", "12:00 PM",
+    "01:00 PM", "02:00 PM", "03:00 PM", "04:00 PM",
+    "05:00 PM", "06:00 PM", "07:00 PM", "08:00 PM", "09:00 PM"
+]
+
 logger = logging.getLogger(__name__)
 
-async def get_available_time_slots(salon_id: str, selected_date: datetime) -> List[Dict]:
+async def get_available_time_slots(salon_id: str, expert_id: str, selected_date: datetime) -> List[Dict]:
     """
-    Get available time slots for a given salon and date using the salon endpoint.
+    Get available time slots for a given salon, expert, and date.
     Returns a list of time slots with start and end times.
     """
     try:
-        # Format date for API call
-        date_str = selected_date.strftime("%Y-%m-%d")
-        
-        # Make API call to salon endpoint
-        async with httpx.AsyncClient(base_url="http://localhost:8000") as client:
-            response = await client.get(f"api/salons/salons/{salon_id}/available-slots?date={date_str}")
-            if response.status_code == 200:
-                data = response.json()
-                print(data)
-                return data.get("available_slots", [])
+        # Get the expert from the specific salon
+        expert = await get_expert_by_salon(salon_id, expert_id)
+        if not expert:
             return []
-    except Exception as e:
-        print(f"Error getting available time slots: {str(e)}")
-        return []
 
+        # Get expert's availability
+        availability = expert.availability
+        if not any(availability):  # Skip if expert is not available at all
+            return []
+
+        # Initialize availability array for each hour (9am to 9pm)
+        available_slots = []
+        for hour in range(9, 22):  # 9am to 9pm
+            slot = {
+                "start_time": f"{hour:02d}:00",
+                "end_time": f"{hour + 1:02d}:00",
+                "available": False
+            }
+            available_slots.append(slot)
+
+        # Check each time slot
+        for i, slot in enumerate(available_slots):
+            if availability[i]:  # If expert is available at this hour
+                # Check if expert has any appointments at this time
+                appointments = await Database().appointments.find({
+                    "expert_id": expert_id,
+                    "appointment_date": selected_date,
+                    "appointment_time": slot["start_time"],
+                    "status": {"$in": ["confirmed", "pending"]}
+                }).to_list(length=None)
+
+                if not appointments:
+                    slot["available"] = True
+
+        # Filter out unavailable slots
+        available_slots = [slot for slot in available_slots if slot["available"]]
+        return available_slots
+    except Exception as e:
+        logger.error(f"Error getting available time slots: {str(e)}")
+        return []
+    
 async def get_available_experts(salon_id: str, selected_date: datetime, time_slot: Dict) -> List[Dict]:
     """
     Get available experts for a given salon, date, and time slot.
@@ -55,11 +87,30 @@ async def get_available_experts(salon_id: str, selected_date: datetime, time_slo
             if not expert:
                 continue
 
-            # Check if expert is currently working
-            if expert.isWorking:
+            # Get expert's availability dictionary (weekday-based)
+            availability = expert.get("availability", {})
+            if not isinstance(availability, dict):
+                continue  # skip if somehow wrong format
+
+            # Get weekday index as string (e.g., "0" for Monday)
+            weekday = str(selected_date.weekday())
+
+            # Safety check for weekday availability
+            day_slots = availability.get(weekday)
+            if not day_slots:
+                continue  # No availability data for this weekday
+
+            # Convert time slot to index (9 AM = index 0)
+            hour = int(time_slot["start_time"].split(":")[0])
+            availability_index = hour - 9  # 9am is index 0
+
+            if availability_index < 0 or availability_index >= len(day_slots):
                 continue
 
-            # Check if expert has any appointments at this time
+            if not day_slots[availability_index]:
+                continue
+
+            # Check for overlapping appointments
             appointments = await Database().appointments.find({
                 "expert_id": expert_id,
                 "appointment_date": selected_date,
@@ -68,12 +119,17 @@ async def get_available_experts(salon_id: str, selected_date: datetime, time_slo
             }).to_list(length=None)
 
             if not appointments:
-                available_experts.append(expert)
+                available_experts.append({
+                    "expert_id": expert_id,
+                    "name": expert.get("name", "Unknown Expert"),
+                    "specialization": expert.get("specialization", "General")
+                })
 
         return available_experts
     except Exception as e:
-        print(f"Error getting available experts: {str(e)}")
+        logger.error(f"Error getting available experts: {str(e)}", exc_info=True)
         return []
+
 
 class BookingService:
     def __init__(self):
@@ -149,9 +205,6 @@ class BookingService:
             self._reset_user_state(phone_number)
             await self.twilio_service.send_sms(phone_number, "Something went wrong. Please type 'hi' to start again.")
             return {"status": "error", "message": "Unknown registration step"}
-
-
-    
 
     def _reset_user_state(self, phone_number: str) -> None:
         """Reset user state and retry count"""
@@ -311,7 +364,7 @@ class BookingService:
                 return True
             elif state == "time_selection":
                 # Validate time format (HH:MM)
-                datetime.strptime(message.strip(), "%H:%M")
+                datetime.strptime(message.strip(), "%I:%M %p")
                 return True
             elif state == "confirmation":
                 return message.lower() in ["confirm", "cancel"]
@@ -351,77 +404,6 @@ class BookingService:
         await self.twilio_service.send_sms(phone_number, message)
         return {"status": "success"}
     
-    async def _handle_registration_state(self, phone_number: str, message: str) -> Dict:
-        state = self.user_states.get(phone_number, {})
-        registration_data = state.get("registration_data", {})
-        step = state.get("registration_step", "name")
-
-        if step == "name":
-            registration_data["name"] = message.strip()
-            self.user_states[phone_number].update({
-                "registration_step": "email",
-                "registration_data": registration_data
-            })
-            await self.twilio_service.send_sms(phone_number, "Please enter your email:")
-            return {"status": "awaiting_email"}
-        
-        elif step == "email":
-            registration_data["email"] = message.strip()
-            self.user_states[phone_number].update({
-                "registration_step": "address",
-                "registration_data": registration_data
-            })
-            await self.twilio_service.send_sms(phone_number, "Please enter your address:")
-            return {"status": "awaiting_address"}
-
-        elif step == "address":
-            registration_data["address"] = message.strip()
-            self.user_states[phone_number].update({
-                "registration_step": "password",
-                "registration_data": registration_data
-            })
-            await self.twilio_service.send_sms(phone_number, "Please enter a password (minimum 8 characters):")
-            return {"status": "awaiting_password"}
-
-        elif step == "password":
-            if len(message.strip()) < 8:
-                await self.twilio_service.send_sms(phone_number, "❌ Password too short. Please enter at least 8 characters:")
-                return {"status": "invalid_password"}
-
-            registration_data["password"] = message.strip()
-
-            try:
-                user = UserCreate(
-                    name=registration_data["name"],
-                    email=registration_data["email"],
-                    phone_number=phone_number,
-                    address=registration_data["address"],
-                    password=registration_data["password"]
-                )
-                new_user = await create_user(user)
-
-                self.user_states[phone_number] = {
-                    "state": "salon_selection",
-                    "user_id": new_user.user_id,
-                    "last_message_time": datetime.now()
-                }
-
-                await self.twilio_service.send_sms(phone_number, f"🎉 Registration successful! Welcome {user.name}!")
-                return await self._show_salons(phone_number)
-
-            except Exception as e:
-                await self.twilio_service.send_sms(phone_number, "⚠️ Registration failed. Please try again later.")
-                self._reset_user_state(phone_number)
-                return {"status": "error", "message": str(e)}
-
-        else:
-            self._reset_user_state(phone_number)
-            await self.twilio_service.send_sms(phone_number, "Something went wrong. Please type 'hi' to start again.")
-            return {"status": "error", "message": "Unknown registration step"}
-
-
-    
-
     async def _show_salons(self, phone_number: str) -> Dict:
         try:
             salons = await get_all_salons()
@@ -443,7 +425,6 @@ class BookingService:
             await self.twilio_service.send_sms(phone_number, "Something went wrong. Please type 'hi' to start again.")
             self._reset_user_state(phone_number)
             return {"status": "error", "message": str(e)}
-
 
     async def _handle_salon_selection_state(self, phone_number: str, message: str) -> Dict:
         """Handle salon selection by the user"""
@@ -568,38 +549,25 @@ class BookingService:
         """Show available experts for the selected salon"""
         try:
             salon = self.user_states[phone_number]["selected_salon"]
-            expert_ids = await get_salon_experts(salon.salon_id)
-            
-            if not expert_ids:
+            expert_list = await get_salon_experts(salon.salon_id)
+
+            if not expert_list:
                 message = "No experts available at this salon. Please select another salon by sending 'hi'."
                 await self.twilio_service.send_sms(phone_number, message)
                 self._reset_user_state(phone_number)
                 return {"status": "error", "message": "No experts available"}
 
             # Store experts in user state
-            self.user_states[phone_number]["experts"] = []
-            
-            # Format expert list message - Simple list with only expert names
-            message = "Please select an expert by typing its number:\n\n"
-            for i, expert_id in enumerate(expert_ids, 1):
-                try:
-                    expert = await get_expert(expert_id)
-                    if expert:
-                        self.user_states[phone_number]["experts"].append(expert)
-                        # Simplified display - just the name
-                        message += f"{i}. {expert.name}\n"
-                except Exception as e:
-                    continue
-            
-            if not self.user_states[phone_number]["experts"]:
-                message = "Error loading experts. Please try again by sending 'hi'."
-                await self.twilio_service.send_sms(phone_number, message)
-                self._reset_user_state(phone_number)
-                return {"status": "error", "message": "Error loading experts"}
+            self.user_states[phone_number]["experts"] = expert_list
 
-            # Send expert list
+            # Format expert list message - show only expert names
+            message = "Please select an expert by typing its number:\n\n"
+            for i, expert in enumerate(expert_list, 1):
+                message += f"{i}. {expert.get('name', 'Unknown Expert')}\n"
+
             await self.twilio_service.send_sms(phone_number, message)
             return {"status": "success"}
+
         except Exception as e:
             error_msg = "Sorry, we're having trouble fetching the expert list. Please try again by sending 'hi'."
             await self.twilio_service.send_sms(phone_number, error_msg)
@@ -610,26 +578,30 @@ class BookingService:
         try:
             expert_index = int(message.strip()) - 1
             experts = self.user_states[phone_number].get("experts", [])
-            
+
             if not experts:
                 return await self._show_experts(phone_number)
-            
+
             if 0 <= expert_index < len(experts):
                 selected_expert = experts[expert_index]
+
                 # Validate state transition
                 if not self._validate_state_transition(self.user_states[phone_number]["state"], "date_selection"):
                     self._reset_user_state(phone_number)
                     return {"message": "Invalid state transition. Please send 'hi' to start over."}
-                
+
                 self.user_states[phone_number].update({
                     "state": "date_selection",
                     "selected_expert": selected_expert
                 })
+
                 return await self._show_available_dates(phone_number)
+
             else:
                 if self._increment_retry(phone_number):
                     return await self._show_experts(phone_number)
                 return {"message": "Invalid selection. Please choose a number from the list."}
+
         except (ValueError, KeyError):
             if self._increment_retry(phone_number):
                 return await self._show_experts(phone_number)
@@ -705,123 +677,119 @@ class BookingService:
             self._reset_user_state(phone_number)
             return {"status": "error", "message": str(e)}
 
+    async def _show_available_times(self, phone_number: str) -> Dict:
+        try:
+            state = self.user_states[phone_number]
+            salon_id = state["selected_salon"].salon_id
+            expert_id = state["selected_expert"]["expert_id"]
+            selected_date = datetime.strptime(state["selected_date"], "%Y-%m-%d")
+            weekday_index = str(selected_date.weekday())  # "0" (Monday) to "6" (Sunday)
 
+            # Fetch expert weekly availability from DB
+            availability = await get_expert_availability(salon_id, expert_id)
+            
+            # First check if expert is available at all
+            if not availability or not availability.is_available:
+                await self.twilio_service.send_sms(phone_number, "This expert is not available. Please select another expert.")
+                state["state"] = "expert_selection"
+                return await self._show_experts(phone_number)
 
-async def _show_available_times(self, phone_number: str) -> Dict:
-    """Show available time slots for the selected date"""
-    try:
-        state = self.user_states[phone_number]
-        salon_id = state["selected_salon"].salon_id
-        selected_date = datetime.strptime(state["selected_date"], "%Y-%m-%d")
+            # Get slots for the specific day
+            slots_for_day = availability.availability.get(weekday_index, [False] * 13)
+            
+            # Check if expert has any available slots for this day
+            if not any(slots_for_day):
+                await self.twilio_service.send_sms(phone_number, "No available time slots for this date. Please try another date.")
+                state["state"] = "date_selection"
+                return await self._show_available_dates(phone_number)
 
-        # Step 1: Fetch raw time slots (dicts with time strings)
-        raw_slots = await get_available_time_slots(salon_id, selected_date)
-        logger.info(f"Raw slots for {salon_id} on {selected_date}: {raw_slots}")
+            available_slots = []
+            for i, is_available in enumerate(slots_for_day):
+                if is_available:
+                    # Check if there are any existing appointments at this time
+                    appointments = await self.db.appointments.find({
+                        "expert_id": expert_id,
+                        "appointment_date": selected_date,
+                        "appointment_time": TIME_LABELS[i],
+                        "status": {"$in": ["confirmed", "pending"]}
+                    }).to_list(length=None)
 
-        # Step 2: Convert to TimeSlot objects
-        available_slots = []
-        for slot in raw_slots:
-            try:
-                ts = TimeSlot(
-                    start_time=datetime.strptime(slot['start_time'], "%H:%M").time()
-                    if isinstance(slot['start_time'], str) else slot['start_time'],
-                    end_time=datetime.strptime(slot['end_time'], "%H:%M").time()
-                    if isinstance(slot['end_time'], str) else slot['end_time'],
-                )
-                available_slots.append(ts)
-            except Exception as e:
-                logger.error(f"Error converting slot {slot}: {e}")
+                    if not appointments:  # Only add slot if no existing appointments
+                        start_time = datetime.strptime(TIME_LABELS[i], "%I:%M %p").time()
+                        end_time = (datetime.combine(datetime.today(), start_time) + timedelta(hours=1)).time()
+                        available_slots.append({
+                            "start_time": TIME_LABELS[i],
+                            "end_time": end_time.strftime("%I:%M %p")
+                        })
 
-        # Step 3: Handle no available slots
-        if not available_slots:
-            message = "Sorry, no time slots are available for this date. Please select another date."
+            if not available_slots:
+                await self.twilio_service.send_sms(phone_number, "No available time slots for this date. Please try another date.")
+                state["state"] = "date_selection"
+                return await self._show_available_dates(phone_number)
+
+            # Format message
+            message = "Please select a time slot by typing its number:\n\n"
+            for idx, slot in enumerate(available_slots, 1):
+                message += f"{idx}. {slot['start_time']}\n"
+
+            # Store available slots in state
+            self.user_states[phone_number]["available_time_slots"] = available_slots
+            self.user_states[phone_number]["state"] = "time_selection"
+
             await self.twilio_service.send_sms(phone_number, message)
-            state["state"] = "date_selection"
-            return await self._show_available_dates(phone_number)
+            return {"status": "success"}
 
-        # Step 4: Format slots for display
-        message = "Please select a time slot by typing its number:\n\n"
-        for i, slot in enumerate(available_slots, 1):
-            message += f"{i}. {slot.start_time.strftime('%H:%M')} - {slot.end_time.strftime('%H:%M')}\n"
-
-        # Step 5: Save to user state and send
-        self.user_states[phone_number]["available_time_slots"] = available_slots
-        await self.twilio_service.send_sms(phone_number, message)
-        return {"status": "success"}
-
-    except Exception as e:
-        logger.exception(f"Error in showing available times: {e}")
-        error_msg = "Sorry, we're having trouble with time selection. Please try again by sending 'hi'."
-        await self.twilio_service.send_sms(phone_number, error_msg)
-        self._reset_user_state(phone_number)
-        return {"status": "error", "message": str(e)}
-
+        except Exception as e:
+            logger.exception(f"Error in showing available times: {e}")
+            await self.twilio_service.send_sms(phone_number, "Something went wrong. Please try again by sending 'hi'.")
+            self._reset_user_state(phone_number)
+            return {"status": "error", "message": str(e)}
 
     async def _handle_time_selection_state(self, phone_number: str, message: str) -> Dict:
         try:
             time_index = int(message.strip()) - 1
             time_slots = self.user_states[phone_number].get("available_time_slots", [])
-            
+            state = self.user_states[phone_number]
+
             if not time_slots:
                 return await self._show_available_times(phone_number)
-            
+
             if 0 <= time_index < len(time_slots):
                 selected_slot = time_slots[time_index]
-                state = self.user_states[phone_number]
-                
-                # Get available experts for this time slot
-                available_experts = await get_available_experts(
-                    state["selected_salon"].salon_id,
-                    datetime.strptime(state["selected_date"], "%Y-%m-%d"),
-                    selected_slot
-                )
-                
-                if not available_experts:
-                    message = "Sorry, no experts are available at this time. Please select another time slot."
-                    await self.twilio_service.send_sms(phone_number, message)
-                    return await self._show_available_times(phone_number)
-                
-                # Store the current service selection
+                state["state"] = "confirmation"
+
+                # Save selected service details
                 current_service = {
                     "salon": state["selected_salon"],
                     "service": state["selected_service"],
                     "expert": state["selected_expert"],
                     "date": state["selected_date"],
-                    "time_slot": selected_slot,
-                    "available_experts": available_experts
+                    "time_slot": selected_slot
                 }
-                
-                # Initialize or update selected_services array
+
                 if "selected_services" not in state:
                     state["selected_services"] = []
                 state["selected_services"].append(current_service)
-                
-                # Move to confirmation state
-                state["state"] = "confirmation"
+
                 return await self._show_confirmation(phone_number)
             else:
                 if self._increment_retry(phone_number):
                     self._reset_user_state(phone_number)
-                    error_msg = "Too many invalid attempts. Please start over by sending 'hi'."
-                    await self.twilio_service.send_sms(phone_number, error_msg)
+                    await self.twilio_service.send_sms(phone_number, "Too many invalid attempts. Please send 'hi' to start over.")
                     return {"status": "error", "message": "Too many retries"}
-                
-                error_msg = "Invalid selection. Please choose a number from the list."
-                await self.twilio_service.send_sms(phone_number, error_msg)
+
+                await self.twilio_service.send_sms(phone_number, "Invalid selection. Please choose a number from the list.")
                 return {"status": "error", "message": "Invalid selection"}
         except ValueError:
             if self._increment_retry(phone_number):
                 self._reset_user_state(phone_number)
-                error_msg = "Too many invalid attempts. Please start over by sending 'hi'."
-                await self.twilio_service.send_sms(phone_number, error_msg)
+                await self.twilio_service.send_sms(phone_number, "Too many invalid attempts. Please send 'hi' to start over.")
                 return {"status": "error", "message": "Too many retries"}
-            
-            error_msg = "Please enter a valid number."
-            await self.twilio_service.send_sms(phone_number, error_msg)
+
+            await self.twilio_service.send_sms(phone_number, "Please enter a valid number.")
             return {"status": "error", "message": "Invalid number format"}
         except Exception as e:
-            error_msg = "Sorry, something went wrong with your time selection. Please try again by sending 'hi'."
-            await self.twilio_service.send_sms(phone_number, error_msg)
+            await self.twilio_service.send_sms(phone_number, "Something went wrong. Please send 'hi' to try again.")
             self._reset_user_state(phone_number)
             return {"status": "error", "message": str(e)}
 
@@ -840,12 +808,28 @@ async def _show_available_times(self, phone_number: str) -> Dict:
             # Build confirmation message
             message = "Please confirm your booking:\n\n"
             for i, service_data in enumerate(selected_services, 1):
+                print("DEBUG SERVICE DATA:", service_data)
+
+                slot = service_data["time_slot"]
+                expert = service_data["expert"]
+                print("DEBUG SLOT:", slot)
+                print("DEBUG EXPERT:", expert)
+
                 message += f"Service {i}:\n"
                 message += f"Salon: {service_data['salon'].name}\n"
                 message += f"Service: {service_data['service'].name}\n"
-                message += f"Expert: {service_data['expert'].name}\n"
+                message += f"Expert: {expert['name']}\n"  # Ensure key exists
                 message += f"Date: {service_data['date']}\n"
-                message += f"Time: {service_data['time_slot'].start_time.strftime('%H:%M')} - {service_data['time_slot'].end_time.strftime('%H:%M')}\n\n"
+                start_time = slot["start_time"]
+                end_time = slot["end_time"]
+
+                if isinstance(start_time, str):
+                    start_time = datetime.strptime(start_time, "%I:%M %p").time()
+                if isinstance(end_time, str):
+                    end_time = datetime.strptime(end_time, "%I:%M %p").time()
+
+                message += f"Time: {start_time.strftime('%I:%M %p')} - {end_time.strftime('%I:%M %p')}\n\n"
+
 
             # Add options based on number of services selected
             if len(selected_services) < 5:
@@ -872,50 +856,70 @@ async def _show_available_times(self, phone_number: str) -> Dict:
 
             if message == "confirm":
                 try:
-                    # Create all appointments
                     created_appointments = []
+
                     for service_data in selected_services:
-                        # Create appointment data
-                        appointment_date = datetime.strptime(
-                            f"{service_data['date']} {service_data['time_slot']}", 
-                            "%Y-%m-%d %H:%M"
+                        # Convert dict to TimeSlot object
+                        raw_slot = service_data["time_slot"]
+                        if isinstance(raw_slot, dict):
+                            slot = TimeSlot(
+                                start_time=datetime.strptime(raw_slot["start_time"], "%I:%M %p").time(),
+                                end_time=datetime.strptime(raw_slot["end_time"], "%I:%M %p").time()
+                            )
+                        else:
+                            slot = raw_slot  # already a TimeSlot object
+
+                        appointment_date = datetime.strptime(service_data["date"], "%Y-%m-%d").replace(
+                            hour=slot.start_time.hour,
+                            minute=slot.start_time.minute,
+                            second=0,
+                            microsecond=0
                         )
-                        
-                        # Create appointment
+
                         appointment = AppointmentCreate(
                             user_id=state["user_id"],
                             salon_id=service_data["salon"].salon_id,
                             service_id=service_data["service"].service_id,
-                            expert_id=service_data["expert"].expert_id,
+                            expert_id=service_data["expert"]["expert_id"],
                             appointment_date=appointment_date,
-                            appointment_time=service_data["time_slot"]
+                            appointment_time=slot.start_time.strftime("%I:%M %p")
                         )
-                        
-                        # Save to database
+
                         created_appointment = await create_appointment(appointment)
                         created_appointments.append(created_appointment)
-                        
-                        # Update salon's appointments array
+
                         await self.db.salons.update_one(
                             {"salon_id": service_data["salon"].salon_id},
                             {"$addToSet": {"appointments": created_appointment.appointment_id}}
                         )
-                    
-                    # Send confirmation
+
                     confirmation_message = "✅ All bookings confirmed!\n\n"
                     for i, service_data in enumerate(selected_services, 1):
+                        slot = service_data["time_slot"]
+
+                        # Parse start_time
+                        start_time = slot["start_time"]
+                        if isinstance(start_time, str):
+                            start_time = datetime.strptime(start_time, "%I:%M %p").time()
+
+                        # Parse end_time
+                        end_time = slot["end_time"]
+                        if isinstance(end_time, str):
+                            end_time = datetime.strptime(end_time, "%I:%M %p").time()
+
                         confirmation_message += f"Booking {i}:\n"
                         confirmation_message += f"Salon: {service_data['salon'].name}\n"
                         confirmation_message += f"Service: {service_data['service'].name}\n"
-                        confirmation_message += f"Expert: {service_data['expert'].name}\n"
+                        confirmation_message += f"Expert: {service_data['expert']['name']}\n"
                         confirmation_message += f"Date: {service_data['date']}\n"
-                        confirmation_message += f"Time: {service_data['time_slot']}\n\n"
+                        confirmation_message += f"Time: {start_time.strftime('%I:%M %p')} - {end_time.strftime('%I:%M %p')}\n\n"
+
                     confirmation_message += "We'll send you reminders before your appointments."
-                    
                     await self.twilio_service.send_sms(phone_number, confirmation_message)
                     self._reset_user_state(phone_number)
                     return {"status": "success", "message": "All bookings confirmed"}
-                    
+
+
                 except Exception as e:
                     error_msg = "Sorry, there was an error creating your appointments. Please try again by sending 'hi'."
                     await self.twilio_service.send_sms(phone_number, error_msg)
@@ -923,12 +927,10 @@ async def _show_available_times(self, phone_number: str) -> Dict:
                     return {"status": "error", "message": str(e)}
 
             elif message == "add more" and len(selected_services) < 5:
-                # Reset to service selection state but keep the same salon
                 state["state"] = "service_selection"
                 return await self._show_services(phone_number)
 
             elif message == "cancel":
-                # Reset the state
                 self._reset_user_state(phone_number)
                 await self.twilio_service.send_sms(phone_number, "Booking cancelled. Send 'hi' to start over.")
                 return {"status": "success", "message": "Booking cancelled"}
@@ -939,7 +941,7 @@ async def _show_available_times(self, phone_number: str) -> Dict:
                     error_msg = "Too many invalid attempts. Please start over by sending 'hi'."
                     await self.twilio_service.send_sms(phone_number, error_msg)
                     return {"status": "error", "message": "Too many retries"}
-                
+
                 error_msg = "Please type 'confirm' to proceed"
                 if len(selected_services) < 5:
                     error_msg += ", 'add more' to add another service"

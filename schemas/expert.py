@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Dict
 import re
 import random
 import string
@@ -13,16 +13,17 @@ class ExpertBase(BaseModel):
     salon_id: str
     specialization: Optional[str] = None
     experties: Optional[List[str]] = None
-    isWorking: bool = Field(default=False, description="Indicates if the expert is currently working on a service")
 
 class ExpertCreate(ExpertBase):
     pass
 
-class ExpertUpdate(ExpertBase):
+class ExpertUpdate(BaseModel):
     name: Optional[str] = None
-    expertise: Optional[str] = None
-    salon_id: Optional[str] = None
-    isWorking: Optional[bool] = None
+    phone: Optional[str] = None
+    address: Optional[str] = None
+    specialization: Optional[str] = None
+    experties: Optional[List[str]] = None
+    availability: Optional[List[bool]] = None
 
 class Expert(ExpertBase):
     expert_id: str
@@ -36,7 +37,12 @@ class ExpertAvailability(BaseModel):
     expert_id: str
     salon_id: str
     is_available: bool = True
-    isWorking: bool = Field(default=False, description="Indicates if the expert is currently working on a service")
+    availability: Dict[str, List[bool]] = Field(
+        default_factory=lambda: {
+            str(i): [True] * 13 for i in range(7)
+        },
+        description="Map weekday index ('0'=Sunday) to 13 hourly slots (9AM–9PM)"
+    )
 
 def generate_expert_id(name: str) -> str:
     # Remove special characters and spaces from name

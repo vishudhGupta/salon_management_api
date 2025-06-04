@@ -23,8 +23,8 @@ logger = logging.getLogger('database')
 load_dotenv()
 
 class Database:
-    client = None  # type: Optional[AsyncIOMotorClient]
-    db = None  # type: Optional[AsyncIOMotorDatabase]
+    client = None  
+    db = None  
     MAX_RETRIES = 3
     RETRY_DELAY = 1  # seconds
 
@@ -64,7 +64,7 @@ class Database:
                 
                 # Initialize collections if they don't exist
                 collections = await cls.db.list_collection_names()
-                required_collections = ['users', 'salons', 'experts', 'services', 'appointments', 'ratings', 'notifications']
+                required_collections = ['users', 'salons', 'experts', 'services', 'appointments', 'ratings', 'notifications', 'expert_availability']
                 
                 for collection in required_collections:
                     if collection not in collections:
@@ -111,6 +111,7 @@ class Database:
         self.appointments = self.db.appointments
         self.ratings = self.db.ratings
         self.notifications = self.db.notifications
+        self.expert_availability = self.db.expert_availability
 
     @classmethod
     def get_db(cls) -> 'Database':
