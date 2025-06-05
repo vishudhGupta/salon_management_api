@@ -3,10 +3,10 @@ from typing import List, Dict
 from datetime import datetime
 from schemas.salon import (
     Salon, SalonCreate, TimeSlot,
-    ExpertAvailability
+    ExpertAvailability, SalonUpdate
 )
 from schemas.salon_dashbboard import SalonDashboard
-from crud import salon_crud, expert_crud
+from crud import salon_crud, expert_crud, rating_crud
 from config.database import get_db, Database
 
 
@@ -197,5 +197,72 @@ async def update_expert_availability_endpoint(
             raise HTTPException(status_code=400, detail="Failed to update expert availability")
         
         return {"message": "Expert availability updated successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.put("/{salon_id}", response_model=Salon)
+async def update_salon(salon_id: str, salon_update: SalonUpdate, db: Database = Depends(get_db)):
+    """
+    Update salon information.
+    Only the fields provided in the request will be updated.
+    """
+    # Convert Pydantic model to dict and remove None values
+    update_data = salon_update.dict(exclude_unset=True)
+    
+    # Add updated_at timestamp
+    update_data["updated_at"] = datetime.utcnow()
+    
+    salon = await salon_crud.update_salon(salon_id, update_data)
+    if not salon:
+        raise HTTPException(status_code=404, detail="Salon not found")
+    return salon
+
+@router.put("/{salon_id}/ratings", response_model=Salon)
+async def update_salon_ratings(
+    salon_id: str,
+    rating_data: dict,
+    db: Database = Depends(get_db)
+):
+    """
+    Update salon ratings and total ratings.
+    Expected payload:
+    {
+        "rating": float,  # New rating to add
+        "user_id": str,   # ID of the user giving the rating
+        "comment": str    # Optional comment
+    }
+    """
+    try:
+        # Verify salon exists
+        salon = await salon_crud.get_salon(salon_id)
+        if not salon:
+            raise HTTPException(status_code=404, detail="Salon not found")
+
+        # Validate rating
+        rating = rating_data.get("rating")
+        if not isinstance(rating, (int, float)) or rating < 1 or rating > 5:
+            raise HTTPException(
+                status_code=400,
+                detail="Rating must be a number between 1 and 5"
+            )
+
+        # Add or update rating
+        rating_obj = await rating_crud.add_rating(
+            salon_id=salon_id,
+            user_id=rating_data["user_id"],
+            rating=rating,
+            comment=rating_data.get("comment")
+        )
+
+        if not rating_obj:
+            raise HTTPException(
+                status_code=400,
+                detail="Failed to update rating"
+            )
+
+        # Get updated salon data
+        updated_salon = await salon_crud.get_salon(salon_id)
+        return updated_salon
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) 

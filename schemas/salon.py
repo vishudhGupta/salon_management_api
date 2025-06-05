@@ -15,6 +15,15 @@ class BreakTime(BaseModel):
     start_time: time
     end_time: time
 
+class Rating(BaseModel):
+    user_id: str
+    rating: float = Field(ge=1, le=5)  # Rating between 1 and 5
+    comment: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+    class Config:
+        from_attributes = True  # Updated from orm_mode for Pydantic v2
+
 class SalonBase(BaseModel):
     name: str
     address: str
@@ -23,6 +32,7 @@ class SalonBase(BaseModel):
     services: List[str] = []
     experts: List[str] = []
     appointments: List[str] = []
+    ratings: List[Rating] = []  # List of Rating objects
     average_rating: float = 0.0
     total_ratings: int = 0
 
@@ -37,6 +47,7 @@ class SalonUpdate(BaseModel):
     services: Optional[List[str]] = None
     experts: Optional[List[str]] = None
     appointments: Optional[List[str]] = None
+    ratings: Optional[List[Rating]] = None
 
 class Salon(SalonBase):
     salon_id: str
@@ -44,7 +55,19 @@ class Salon(SalonBase):
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
     class Config:
-        orm_mode = True
+        from_attributes = True  # Updated from orm_mode for Pydantic v2
+
+    @property
+    def calculate_average_rating(self) -> float:
+        """Calculate average rating from the ratings list"""
+        if not self.ratings:
+            return 0.0
+        return sum(r.rating for r in self.ratings) / len(self.ratings)
+
+    @property
+    def calculate_total_ratings(self) -> int:
+        """Calculate total number of ratings"""
+        return len(self.ratings)
 
 class Appointment(BaseModel):
     appointment_id: str

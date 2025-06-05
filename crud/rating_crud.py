@@ -4,7 +4,7 @@ from config.database import Database
 from datetime import datetime
 
 async def add_rating(salon_id: str, user_id: str, rating: float, comment: Optional[str] = None) -> Optional[Rating]:
-    db = Database.get_db()
+    db = Database()
     
     # Create rating object
     rating_obj = Rating(
@@ -19,35 +19,44 @@ async def add_rating(salon_id: str, user_id: str, rating: float, comment: Option
         {"salon_id": salon_id},
         {
             "$push": {"ratings": rating_obj.dict()},
-            "$inc": {"total_ratings": 1}
+            "$set": {
+                "average_rating": rating_obj.rating,  # Will be recalculated
+                "total_ratings": 1  # Will be recalculated
+            }
         }
     )
     
     if update_result.modified_count:
-        # Recalculate average rating
+        # Get updated salon to recalculate averages
         salon = await db.salons.find_one({"salon_id": salon_id})
         if salon and "ratings" in salon:
+            # Calculate new averages
             total_rating = sum(r["rating"] for r in salon["ratings"])
             avg_rating = total_rating / len(salon["ratings"])
             
-            # Update average rating
+            # Update with calculated values
             await db.salons.update_one(
                 {"salon_id": salon_id},
-                {"$set": {"average_rating": avg_rating}}
+                {
+                    "$set": {
+                        "average_rating": round(avg_rating, 1),
+                        "total_ratings": len(salon["ratings"])
+                    }
+                }
             )
         
         return rating_obj
     return None
 
 async def get_salon_ratings(salon_id: str) -> List[Rating]:
-    db = Database.get_db()
+    db = Database()
     salon = await db.salons.find_one({"salon_id": salon_id})
     if salon and "ratings" in salon:
         return [Rating(**rating) for rating in salon["ratings"]]
     return []
 
 async def get_user_ratings(user_id: str) -> List[Rating]:
-    db = Database.get_db()
+    db = Database()
     # Find all salons where the user has left a rating
     salons = await db.salons.find(
         {"ratings.user_id": user_id}
@@ -64,7 +73,7 @@ async def get_user_ratings(user_id: str) -> List[Rating]:
     return user_ratings
 
 async def update_rating(salon_id: str, user_id: str, new_rating: float, new_comment: Optional[str] = None) -> Optional[Rating]:
-    db = Database.get_db()
+    db = Database()
     
     # Update the rating in salon's ratings array
     update_result = await db.salons.update_one(
@@ -82,16 +91,22 @@ async def update_rating(salon_id: str, user_id: str, new_rating: float, new_comm
     )
     
     if update_result.modified_count:
-        # Recalculate average rating
+        # Get updated salon to recalculate averages
         salon = await db.salons.find_one({"salon_id": salon_id})
         if salon and "ratings" in salon:
+            # Calculate new averages
             total_rating = sum(r["rating"] for r in salon["ratings"])
             avg_rating = total_rating / len(salon["ratings"])
             
-            # Update average rating
+            # Update with calculated values
             await db.salons.update_one(
                 {"salon_id": salon_id},
-                {"$set": {"average_rating": avg_rating}}
+                {
+                    "$set": {
+                        "average_rating": round(avg_rating, 1),
+                        "total_ratings": len(salon["ratings"])
+                    }
+                }
             )
         
         return Rating(
@@ -103,19 +118,16 @@ async def update_rating(salon_id: str, user_id: str, new_rating: float, new_comm
     return None
 
 async def delete_rating(salon_id: str, user_id: str) -> bool:
-    db = Database.get_db()
+    db = Database()
     
     # Remove the rating from salon's ratings array
     update_result = await db.salons.update_one(
         {"salon_id": salon_id},
-        {
-            "$pull": {"ratings": {"user_id": user_id}},
-            "$inc": {"total_ratings": -1}
-        }
+        {"$pull": {"ratings": {"user_id": user_id}}}
     )
     
     if update_result.modified_count:
-        # Recalculate average rating
+        # Get updated salon to recalculate averages
         salon = await db.salons.find_one({"salon_id": salon_id})
         if salon and "ratings" in salon:
             if salon["ratings"]:  # If there are still ratings
@@ -124,10 +136,15 @@ async def delete_rating(salon_id: str, user_id: str) -> bool:
             else:
                 avg_rating = 0.0
             
-            # Update average rating
+            # Update with calculated values
             await db.salons.update_one(
                 {"salon_id": salon_id},
-                {"$set": {"average_rating": avg_rating}}
+                {
+                    "$set": {
+                        "average_rating": round(avg_rating, 1),
+                        "total_ratings": len(salon["ratings"])
+                    }
+                }
             )
         
         return True
