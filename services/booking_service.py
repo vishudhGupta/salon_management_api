@@ -13,14 +13,61 @@ from config.database import Database
 import re
 import httpx
 import logging
+import os
+from logging.handlers import RotatingFileHandler
+
+# Set up logging configuration
+def setup_logging():
+    # Create logs directory if it doesn't exist
+    log_dir = "logs"
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+
+    # Generate timestamp for log file
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = os.path.join(log_dir, f'salon_app_{timestamp}.log')
+
+    # Configure logging
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+
+    # Remove any existing handlers
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+
+    # Create formatters
+    file_formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    console_formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(message)s'
+    )
+
+    # File handler
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(file_formatter)
+
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(console_formatter)
+
+    # Add handlers to logger
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+
+    logger.info(f"Logging initialized. Log file: {log_file}")
+    return logger
+
+# Initialize logging
+logger = setup_logging()
 
 TIME_LABELS = [
     "09:00 AM", "10:00 AM", "11:00 AM", "12:00 PM",
     "01:00 PM", "02:00 PM", "03:00 PM", "04:00 PM",
     "05:00 PM", "06:00 PM", "07:00 PM", "08:00 PM", "09:00 PM"
 ]
-
-logger = logging.getLogger(__name__)
 
 async def get_available_time_slots(salon_id: str, expert_id: str, selected_date: datetime) -> List[Dict]:
     """
@@ -208,10 +255,29 @@ class BookingService:
 
     def _reset_user_state(self, phone_number: str) -> None:
         """Reset user state and retry count"""
-        if phone_number in self.user_states:
-            del self.user_states[phone_number]
-        if phone_number in self.retry_counts:
-            del self.retry_counts[phone_number]
+        print(f"[DEBUG] Resetting user state for phone: {phone_number}")
+        try:
+            # Clear from memory
+            if phone_number in self.user_states:
+                del self.user_states[phone_number]
+            if phone_number in self.retry_counts:
+                del self.retry_counts[phone_number]
+            
+            # Clear from database
+            self.db.users.update_one(
+                {"phone_number": phone_number},
+                {
+                    "$unset": {
+                        "state": "",
+                        "review_appointment_id": "",
+                        "last_message_time": ""
+                    }
+                }
+            )
+            print("[DEBUG] User state reset successfully")
+        except Exception as e:
+            print(f"[DEBUG] Error resetting user state: {str(e)}")
+            raise
 
     def _validate_state_transition(self, current_state: str, next_state: str) -> bool:
         """Validate if the state transition is allowed"""
@@ -230,11 +296,16 @@ class BookingService:
     async def handle_incoming_message(self, phone_number: str, message: str) -> Dict:
         """Handle incoming WhatsApp message"""
         try:
+            print(f"\n[DEBUG] Starting handle_incoming_message for phone: {phone_number}")
+            print(f"[DEBUG] Message received: {message}")
+            
             # Clean phone number (remove 'whatsapp:' prefix if present)
             phone_number = phone_number.replace('whatsapp:', '')
+            print(f"[DEBUG] Cleaned phone number: {phone_number}")
             
             # Handle initial greetings
             if message.lower() in ["hi", "hello", "hey", "start"]:
+                print("[DEBUG] Handling initial greeting")
                 self._reset_user_state(phone_number)
                 # Initialize state before sending welcome message
                 try:
@@ -259,14 +330,41 @@ class BookingService:
                 await self.twilio_service.send_welcome_message(phone_number)
                 return {"status": "success"}
             
+            # Check if this is a review response
+            print(f"[DEBUG] Checking user state in memory: {self.user_states.get(phone_number)}")
+            
+            # First check in-memory state
+            if phone_number in self.user_states:
+                state = self.user_states[phone_number].get("state")
+                print(f"[DEBUG] Found state in memory: {state}")
+                if state == "review":
+                    print("[DEBUG] Handling review response from memory state")
+                    return await self._handle_review_response(phone_number, message)
+            
+            # If not in memory, check database
+            print("[DEBUG] Checking user state in database")
+            user = await self.db.users.find_one({"phone_number": phone_number})
+            if user and user.get("state") == "review":
+                print(f"[DEBUG] Found review state in database: {user.get('state')}")
+                # Restore state to memory
+                self.user_states[phone_number] = {
+                    "state": "review",
+                    "review_appointment_id": user.get("review_appointment_id"),
+                    "last_message_time": user.get("last_message_time")
+                }
+                print("[DEBUG] Restored state to memory, handling review response")
+                return await self._handle_review_response(phone_number, message)
+
             # Handle cancel command at any point
             if message.lower() == "cancel":
+                print("[DEBUG] Handling cancel command")
                 self._reset_user_state(phone_number)
                 await self.twilio_service.send_sms(phone_number, "Booking cancelled. Send 'hi' to start over.")
                 return {"status": "success"}
 
             # Initialize state if not exists
             if phone_number not in self.user_states:
+                print("[DEBUG] Initializing new user state")
                 self.user_states[phone_number] = {
                     "state": "welcome",
                     "last_message_time": datetime.now()
@@ -277,6 +375,7 @@ class BookingService:
             # Check for session timeout (30 minutes)
             last_message_time = self.user_states[phone_number].get("last_message_time")
             if last_message_time and (datetime.now() - last_message_time) > timedelta(minutes=30):
+                print("[DEBUG] Session timeout detected")
                 self._reset_user_state(phone_number)
                 self.user_states[phone_number] = {
                     "state": "welcome",
@@ -290,6 +389,7 @@ class BookingService:
 
             # Handle message based on current state
             state = self.user_states[phone_number]["state"]
+            print(f"[DEBUG] Processing message for state: {state}")
 
             if state == "welcome":
                 if message.upper() == "LOGIN":
@@ -549,7 +649,24 @@ class BookingService:
         """Show available experts for the selected salon"""
         try:
             salon = self.user_states[phone_number]["selected_salon"]
-            expert_list = await get_salon_experts(salon.salon_id)
+            expert_ids = await get_salon_experts(salon.salon_id)
+
+            if not expert_ids:
+                message = "No experts available at this salon. Please select another salon by sending 'hi'."
+                await self.twilio_service.send_sms(phone_number, message)
+                self._reset_user_state(phone_number)
+                return {"status": "error", "message": "No experts available"}
+
+            # Fetch expert details for each expert ID
+            expert_list = []
+            for expert_id in expert_ids:
+                expert = await get_expert(expert_id)
+                if expert:
+                    expert_list.append({
+                        "expert_id": expert_id,
+                        "name": expert.name,
+                        "specialization": getattr(expert, 'specialization', 'General')
+                    })
 
             if not expert_list:
                 message = "No experts available at this salon. Please select another salon by sending 'hi'."
@@ -560,10 +677,10 @@ class BookingService:
             # Store experts in user state
             self.user_states[phone_number]["experts"] = expert_list
 
-            # Format expert list message - show only expert names
+            # Format expert list message
             message = "Please select an expert by typing its number:\n\n"
             for i, expert in enumerate(expert_list, 1):
-                message += f"{i}. {expert.get('name', 'Unknown Expert')}\n"
+                message += f"{i}. {expert['name']}\n"
 
             await self.twilio_service.send_sms(phone_number, message)
             return {"status": "success"}
@@ -982,127 +1099,86 @@ class BookingService:
             hours_before
         )
 
-    async def _request_feedback(self, phone_number: str, appointment_id: str) -> Dict:
-        """Request feedback from customer after appointment"""
+    async def _handle_review_response(self, phone_number: str, message: str) -> Dict:
+        """Handle user's review response"""
         try:
-            # First check if appointment exists and is completed
-            appointment = await get_appointment(appointment_id)
-            if not appointment or appointment.status != "completed":
-                return {"status": "error", "message": "Appointment not found or not completed"}
+            print(f"\n[DEBUG] Starting _handle_review_response for phone: {phone_number}")
+            print(f"[DEBUG] Review message received: {message}")
             
-            # Set up feedback collection state
+            state = self.user_states[phone_number]
+            print(f"[DEBUG] Current user state: {state}")
+            
+            appointment_id = state.get("review_appointment_id")
+            print(f"[DEBUG] Review appointment ID: {appointment_id}")
+            
+            if not appointment_id:
+                print("[DEBUG] No appointment ID found in state")
+                self._reset_user_state(phone_number)
+                await self.twilio_service.send_sms(phone_number, "Sorry, something went wrong. Please send 'hi' to start over.")
+                return {"status": "error", "message": "No appointment ID found"}
+            
+            # Handle the review response using the CRUD function
+            print("[DEBUG] Calling handle_review_response from appointment_crud")
+            from crud.appointment_crud import handle_review_response
+            await handle_review_response(appointment_id, message)
+            print("[DEBUG] handle_review_response completed successfully")
+            
+            # Reset user state
+            print("[DEBUG] Resetting user state")
+            self._reset_user_state(phone_number)
+            return {"status": "success"}
+        
+        except Exception as e:
+            print(f"[DEBUG] Error in _handle_review_response: {str(e)}")
+            self._reset_user_state(phone_number)
+            await self.twilio_service.send_sms(phone_number, "Sorry, something went wrong. Please send 'hi' to start over.")
+            return {"status": "error", "message": str(e)}
+
+    async def _setup_review_state(self, phone_number: str, appointment_id: str) -> None:
+        """Set up the review state for a user"""
+        print(f"[DEBUG] Setting up review state in database for phone: {phone_number}")
+        try:
+            # Store review state in database
+            await self.db.users.update_one(
+                {"phone_number": phone_number},
+                {
+                    "$set": {
+                        "state": "review",
+                        "review_appointment_id": appointment_id,
+                        "last_message_time": datetime.now()
+                    }
+                }
+            )
+            print("[DEBUG] Review state stored in database successfully")
+            
+            # Also keep in memory for backward compatibility
             self.user_states[phone_number] = {
-                "state": "feedback",
-                "appointment_id": appointment_id,
+                "state": "review",
+                "review_appointment_id": appointment_id,
                 "last_message_time": datetime.now()
             }
-            
-            # Send feedback request
-            message = (
-                "Thank you for visiting us! We'd love to hear your feedback.\n\n"
-                "Please rate your experience on a scale of 1-5 (5 being the best) "
-                "and include any comments you have.\n\n"
-                "Example: 5 - Great service, very professional!"
-            )
-            await self.twilio_service.send_sms(phone_number, message)
-            return {"status": "success"}
         except Exception as e:
-            return {"status": "error", "message": str(e)}
+            print(f"[DEBUG] Error setting up review state: {str(e)}")
+            raise
 
-    async def _handle_feedback_state(self, phone_number: str, message: str) -> Dict:
-        """Handle feedback from customer"""
+    async def handle_appointment_completion(self, appointment_id: str) -> None:
+        """Handle appointment completion and set up review state"""
         try:
-            # Try to parse rating from message (format: rating - comment)
-            parts = message.split('-', 1)
-            rating = None
-            comment = ""
+            # Get the appointment
+            appointment = await get_appointment(appointment_id)
+            if not appointment:
+                return
             
-            if len(parts) >= 1:
-                try:
-                    rating = int(parts[0].strip())
-                    if rating < 1 or rating > 5:
-                        raise ValueError("Rating must be between 1 and 5")
-                except ValueError:
-                    if self._increment_retry(phone_number):
-                        self._reset_user_state(phone_number)
-                        error_msg = "Too many invalid attempts. Thank you for your time."
-                        await self.twilio_service.send_sms(phone_number, error_msg)
-                        return {"status": "error", "message": "Too many retries"}
-                    
-                    error_msg = "Please provide a rating between 1-5, followed by your comments."
-                    await self.twilio_service.send_sms(phone_number, error_msg)
-                    return {"status": "error", "message": "Invalid rating format"}
+            # Get user's phone number
+            user = await get_user(appointment.user_id)
+            if not user or not user.phone_number:
+                return
             
-            if len(parts) >= 2:
-                comment = parts[1].strip()
+            # Set up review state
+            await self._setup_review_state(user.phone_number, appointment_id)
             
-            # Get appointment ID from state
-            appointment_id = self.user_states[phone_number].get("appointment_id")
-            if not appointment_id:
-                error_msg = "Sorry, we couldn't process your feedback. Please try again later."
-                await self.twilio_service.send_sms(phone_number, error_msg)
-                self._reset_user_state(phone_number)
-                return {"status": "error", "message": "No appointment ID in state"}
-            
-            # Save rating to database
-            try:
-                appointment = await get_appointment(appointment_id)
-                if appointment:
-                    # Create rating object
-                    rating_obj = {
-                        "appointment_id": appointment_id,
-                        "user_id": appointment.user_id,
-                        "salon_id": appointment.salon_id,
-                        "rating": rating,
-                        "comment": comment,
-                        "created_at": datetime.now()
-                    }
-                    
-                    # Save rating to database
-                    await self.db.ratings.insert_one(rating_obj)
-                    
-                    # Update salon's average rating
-                    await self.update_salon_rating(appointment.salon_id)
-                    
-                    # Thank the user
-                    thank_msg = "Thank you for your feedback! We appreciate your input."
-                    await self.twilio_service.send_sms(phone_number, thank_msg)
-                    self._reset_user_state(phone_number)
-                    return {"status": "success"}
-                else:
-                    error_msg = "Sorry, we couldn't find your appointment. Please try again later."
-                    await self.twilio_service.send_sms(phone_number, error_msg)
-                    self._reset_user_state(phone_number)
-                    return {"status": "error", "message": "Appointment not found"}
-            except Exception as e:
-                error_msg = "Sorry, we couldn't save your feedback. Please try again later."
-                await self.twilio_service.send_sms(phone_number, error_msg)
-                self._reset_user_state(phone_number)
-                return {"status": "error", "message": str(e)}
         except Exception as e:
-            error_msg = "Sorry, something went wrong processing your feedback. Please try again later."
-            await self.twilio_service.send_sms(phone_number, error_msg)
-            self._reset_user_state(phone_number)
-            return {"status": "error", "message": str(e)}
+            logging.error(f"Error handling appointment completion: {str(e)}", exc_info=True)
+            raise
 
-    async def update_salon_rating(self, salon_id: str) -> None:
-        """Update salon's average rating"""
-        try:
-            # Get all ratings for this salon
-            ratings = await self.db.ratings.find({"salon_id": salon_id}).to_list(length=None)
-            
-            if ratings:
-                # Calculate average
-                total = sum(r.get("rating", 0) for r in ratings)
-                average = total / len(ratings)
-                
-                # Update salon
-                await self.db.salons.update_one(
-                    {"salon_id": salon_id},
-                    {"$set": {
-                        "average_rating": round(average, 1),
-                        "total_ratings": len(ratings)
-                    }}
-                )
-        except Exception as e:
-            pass 
+   

@@ -3,11 +3,10 @@ from config.database import Database
 from services.booking_service import BookingService
 from routes import (
     user_routes,
-    shop_owner_routes,
     salon_routes,
-    appointment_routes,
+    service_routes,
     expert_routes,
-    service_routes
+    appointment_routes
 )
 import uvicorn
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,16 +25,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include all routers
+# Include routers
 app.include_router(user_routes.router, prefix="/api/users", tags=["users"])
-app.include_router(shop_owner_routes.router, prefix="/api/shop-owners", tags=["shop-owners"])
 app.include_router(salon_routes.router, prefix="/api/salons", tags=["salons"])
-app.include_router(appointment_routes.router, prefix="/api/appointments", tags=["appointments"])
-app.include_router(expert_routes.router, prefix="/api/experts", tags=["experts"])
 app.include_router(service_routes.router, prefix="/api/services", tags=["services"])
+app.include_router(expert_routes.router, prefix="/api/experts", tags=["experts"])
+app.include_router(appointment_routes.router, prefix="/api/appointments", tags=["appointments"])
 
 @app.on_event("startup")
-async def startup_db_client():
+async def startup_event():
+    """Initialize database connection on startup"""
     global booking_service
     try:
         await Database.connect_db()
@@ -48,11 +47,9 @@ async def startup_db_client():
         raise
 
 @app.on_event("shutdown")
-async def shutdown_db_client():
-    try:
-        await Database.close_db()
-    except Exception as e:
-        print(f"Error during shutdown: {str(e)}")
+async def shutdown_event():
+    """Close database connection on shutdown"""
+    await Database.close_db()
 
 @app.get("/")
 def read_root():

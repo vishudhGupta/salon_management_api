@@ -4,6 +4,9 @@ from config.database import Database
 from datetime import datetime
 
 async def add_rating(salon_id: str, user_id: str, rating: float, comment: Optional[str] = None) -> Optional[Rating]:
+    print(f"\n[DEBUG] Starting add_rating for salon_id: {salon_id}, user_id: {user_id}")
+    print(f"[DEBUG] Rating: {rating}, Comment: {comment}")
+    
     db = Database()
     
     # Create rating object
@@ -13,8 +16,10 @@ async def add_rating(salon_id: str, user_id: str, rating: float, comment: Option
         comment=comment,
         created_at=datetime.utcnow()
     )
+    print(f"[DEBUG] Created rating object: {rating_obj}")
     
     # Add rating to salon's ratings array
+    print("[DEBUG] Updating salon document with new rating")
     update_result = await db.salons.update_one(
         {"salon_id": salon_id},
         {
@@ -25,16 +30,20 @@ async def add_rating(salon_id: str, user_id: str, rating: float, comment: Option
             }
         }
     )
+    print(f"[DEBUG] Initial update result: {update_result.modified_count}")
     
     if update_result.modified_count:
         # Get updated salon to recalculate averages
+        print("[DEBUG] Getting updated salon to recalculate averages")
         salon = await db.salons.find_one({"salon_id": salon_id})
         if salon and "ratings" in salon:
             # Calculate new averages
             total_rating = sum(r["rating"] for r in salon["ratings"])
             avg_rating = total_rating / len(salon["ratings"])
+            print(f"[DEBUG] Calculated new averages - Total: {total_rating}, Average: {avg_rating}")
             
             # Update with calculated values
+            print("[DEBUG] Updating salon with calculated averages")
             await db.salons.update_one(
                 {"salon_id": salon_id},
                 {
@@ -44,8 +53,10 @@ async def add_rating(salon_id: str, user_id: str, rating: float, comment: Option
                     }
                 }
             )
+            print("[DEBUG] Successfully updated salon with new averages")
         
         return rating_obj
+    print("[DEBUG] No changes made to salon document")
     return None
 
 async def get_salon_ratings(salon_id: str) -> List[Rating]:

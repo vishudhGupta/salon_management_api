@@ -1,12 +1,17 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from typing import List
 from schemas.appointment import AppointmentCreate, Appointment
 from crud import appointment_crud
+from services.booking_service import BookingService
 
 router = APIRouter(
     prefix="/appointments",
     tags=["appointments"]
 )
+
+# Create a dependency to get BookingService instance
+async def get_booking_service():
+    return BookingService()
 
 @router.post("/", response_model=Appointment)
 async def create_appointment(appointment: AppointmentCreate):
@@ -65,4 +70,17 @@ async def confirm_expert_appointment(appointment_id: str, expert_id: str):
     appointment = await appointment_crud.confirm_expert_appointment(appointment_id, expert_id)
     if not appointment:
         raise HTTPException(status_code=404, detail="Appointment not found")
+    return appointment
+
+@router.post("/{appointment_id}/complete", response_model=Appointment)
+async def complete_appointment(
+    appointment_id: str,
+    booking_service: BookingService = Depends(get_booking_service)
+):
+    """Complete an appointment and trigger review request"""
+    # Complete the appointment and set up review state
+    appointment = await appointment_crud.complete_appointment(appointment_id, booking_service)
+    if not appointment:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+    
     return appointment 
