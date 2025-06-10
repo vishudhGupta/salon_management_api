@@ -3,13 +3,35 @@ from datetime import datetime
 import re
 import random
 import string
-from typing import Optional
+from typing import Optional, Dict
+
+class UserDetails(BaseModel):
+    user_id: str
+    name: str
+    email: str
+    phone_number: str
+    address: str
+
+class ExpertDetails(BaseModel):
+    expert_id: str
+    name: str
+    phone: str
+    address: str
+    specialization: Optional[str] = None
+    experties: Optional[list[str]] = None
+
+class ServiceDetails(BaseModel):
+    service_id: str
+    name: str
+    description: Optional[str] = None
+    cost: float
+    duration: int
 
 class AppointmentBase(BaseModel):
     salon_id: str
-    user_id: str
-    service_id: str
-    expert_id: Optional[str] = Field(None, description="ID of the expert selected for the appointment")
+    user: UserDetails
+    service: ServiceDetails
+    expert: Optional[ExpertDetails] = Field(None, description="Details of the expert selected for the appointment")
     appointment_date: datetime
     appointment_time: str = Field(..., description="Format: HH:MM in 24-hour format")
     notes: Optional[str] = Field(None, description="Any additional notes for the appointment")

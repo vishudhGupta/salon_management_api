@@ -1,5 +1,5 @@
 from typing import List, Optional
-from schemas.appointment import AppointmentCreate, Appointment, generate_appointment_id
+from schemas.appointment import AppointmentCreate, Appointment, generate_appointment_id, UserDetails, ExpertDetails, ServiceDetails
 from config.database import Database
 from datetime import datetime
 from fastapi import HTTPException
@@ -33,7 +33,7 @@ async def check_expert_availability(expert_id: str, appointment_date: datetime, 
 
     # Also check if already booked at this exact time
     existing_appointment = await db.appointments.find_one({
-        "expert_id": expert_id,
+        "expert.expert_id": expert_id,
         "appointment_date": appointment_date,
         "appointment_time": appointment_time,
         "status": {"$in": ["confirmed", "pending"]}
@@ -47,29 +47,55 @@ async def create_appointment(appointment: AppointmentCreate) -> Appointment:
     try:
         db = Database()
 
-        # Validate user
-        user = await db.users.find_one({"user_id": appointment.user_id})
+        # Validate user and get user details
+        user = await db.users.find_one({"user_id": appointment.user.user_id})
         if not user:
-            raise ValueError(f"User with ID {appointment.user_id} not found")
+            raise ValueError(f"User with ID {appointment.user.user_id} not found")
+        
+        user_details = UserDetails(
+            user_id=user["user_id"],
+            name=user["name"],
+            email=user["email"],
+            phone_number=user["phone_number"],
+            address=user["address"]
+        )
 
         # Validate salon
         salon = await db.salons.find_one({"salon_id": appointment.salon_id})
         if not salon:
             raise ValueError(f"Salon with ID {appointment.salon_id} not found")
 
-        # Validate service
-        service = await db.services.find_one({"service_id": appointment.service_id})
+        # Validate service and get service details
+        service = await db.services.find_one({"service_id": appointment.service.service_id})
         if not service:
-            raise ValueError(f"Service with ID {appointment.service_id} not found")
+            raise ValueError(f"Service with ID {appointment.service.service_id} not found")
+        
+        service_details = ServiceDetails(
+            service_id=service["service_id"],
+            name=service["name"],
+            description=service.get("description"),
+            cost=service["cost"],
+            duration=service["duration"]
+        )
 
-        # Validate expert & check availability
-        if appointment.expert_id:
+        # Validate expert & check availability if expert is provided
+        expert_details = None
+        if appointment.expert:
             expert = await db.experts.find_one({
-                "expert_id": appointment.expert_id,
+                "expert_id": appointment.expert.expert_id,
                 "salon_id": appointment.salon_id
             })
             if not expert:
-                raise ValueError(f"Expert with ID {appointment.expert_id} not found in salon {appointment.salon_id}")
+                raise ValueError(f"Expert with ID {appointment.expert.expert_id} not found in salon {appointment.salon_id}")
+
+            expert_details = ExpertDetails(
+                expert_id=expert["expert_id"],
+                name=expert["name"],
+                phone=expert["phone"],
+                address=expert["address"],
+                specialization=expert.get("specialization"),
+                experties=expert.get("experties")
+            )
 
             # Get day name (e.g., "monday")
             weekday = str(appointment.appointment_date.weekday())  # Convert to string index (0-6)
@@ -83,11 +109,11 @@ async def create_appointment(appointment: AppointmentCreate) -> Appointment:
                 raise ValueError(f"Invalid time format: {appointment.appointment_time}")
 
             # Get expert's availability from expert_availability collection
-            availability_doc = await db.expert_availability.find_one({"expert_id": appointment.expert_id})
+            availability_doc = await db.expert_availability.find_one({"expert_id": appointment.expert.expert_id})
             if not availability_doc:
                 # If no availability document exists, create one with default availability
                 availability_doc = {
-                    "expert_id": appointment.expert_id,
+                    "expert_id": appointment.expert.expert_id,
                     "salon_id": appointment.salon_id,
                     "is_available": True,
                     "availability": {str(i): [True] * 13 for i in range(7)}
@@ -96,14 +122,14 @@ async def create_appointment(appointment: AppointmentCreate) -> Appointment:
 
             # Check if expert is available at this time
             availability = availability_doc.get("availability", {})
-            day_slots = availability.get(weekday, [True] * 13)  # Default to all available
+            day_slots = availability.get(weekday, [True] * 13)
 
             if availability_index < 0 or availability_index >= len(day_slots) or not day_slots[availability_index]:
                 raise ValueError(f"Expert not available at {appointment.appointment_time} on {appointment.appointment_date.strftime('%Y-%m-%d')}")
 
             # Check for time conflict with other appointments
             conflict = await db.appointments.find_one({
-                "expert_id": appointment.expert_id,
+                "expert.expert_id": appointment.expert.expert_id,
                 "appointment_date": appointment.appointment_date,
                 "appointment_time": appointment.appointment_time,
                 "status": {"$in": ["pending", "confirmed"]}
@@ -114,15 +140,23 @@ async def create_appointment(appointment: AppointmentCreate) -> Appointment:
         # Generate appointment ID
         appointment_id = generate_appointment_id(
             salon_id=appointment.salon_id,
-            user_id=appointment.user_id
+            user_id=appointment.user.user_id
         )
 
-        # Create appointment document
-        appointment_dict = appointment.dict()
-        appointment_dict["appointment_id"] = appointment_id
-        appointment_dict["status"] = "pending"
-        appointment_dict["created_at"] = datetime.utcnow()
-        appointment_dict["expert_confirmed"] = False
+        # Create appointment document with detailed information
+        appointment_dict = {
+            "appointment_id": appointment_id,
+            "salon_id": appointment.salon_id,
+            "user": user_details.dict(),
+            "service": service_details.dict(),
+            "expert": expert_details.dict() if expert_details else None,
+            "appointment_date": appointment.appointment_date,
+            "appointment_time": appointment.appointment_time,
+            "notes": appointment.notes,
+            "status": "pending",
+            "created_at": datetime.utcnow(),
+            "expert_confirmed": False
+        }
 
         # Insert appointment
         await db.appointments.insert_one(appointment_dict)
@@ -130,16 +164,16 @@ async def create_appointment(appointment: AppointmentCreate) -> Appointment:
         # Update references
         try:
             await db.users.update_one(
-                {"user_id": appointment.user_id},
+                {"user_id": appointment.user.user_id},
                 {"$addToSet": {"appointments": appointment_id}}
             )
             await db.salons.update_one(
                 {"salon_id": appointment.salon_id},
                 {"$addToSet": {"appointments": appointment_id}}
             )
-            if appointment.expert_id:
+            if expert_details:
                 await db.experts.update_one(
-                    {"expert_id": appointment.expert_id},
+                    {"expert_id": expert_details.expert_id},
                     {"$addToSet": {"appointments": appointment_id}}
                 )
         except Exception as e:
@@ -161,7 +195,7 @@ async def get_appointment(appointment_id: str) -> Optional[Appointment]:
 
 async def get_user_appointments(user_id: str) -> List[Appointment]:
     db = Database()
-    appointments = await db.appointments.find({"user_id": user_id}).to_list(length=None)
+    appointments = await db.appointments.find({"user.user_id": user_id}).to_list(length=None)
     return [Appointment(**appointment) for appointment in appointments]
 
 async def get_salon_appointments(salon_id: str) -> List[Appointment]:
@@ -171,7 +205,7 @@ async def get_salon_appointments(salon_id: str) -> List[Appointment]:
 
 async def get_expert_appointments(expert_id: str) -> List[Appointment]:
     db = Database()
-    appointments = await db.appointments.find({"expert_id": expert_id}).to_list(length=None)
+    appointments = await db.appointments.find({"expert.expert_id": expert_id}).to_list(length=None)
     return [Appointment(**appointment) for appointment in appointments]
 
 async def update_appointment(appointment_id: str, appointment_data: dict) -> Optional[Appointment]:
@@ -201,39 +235,14 @@ async def confirm_appointment(appointment_id: str) -> Optional[Appointment]:
         {"$set": {"status": "confirmed"}}
     )
     if update_result.modified_count:
-        appointment = await get_appointment(appointment_id)
-        if appointment:
-            # Get user's phone number
-            user = await db.users.find_one({"user_id": appointment.user_id})
-            if user and user.get("phone_number"):
-                # Get service and salon details
-                service = await db.services.find_one({"service_id": appointment.service_id})
-                salon = await db.salons.find_one({"salon_id": appointment.salon_id})
-                expert = await db.experts.find_one({"expert_id": appointment.expert_id})
-                
-                # Send confirmation message
-                twilio_service = TwilioService()
-                
-                appointment_details = {
-                    "service_name": service.get("name", "Unknown Service") if service else "Unknown Service",
-                    "salon_name": salon.get("name", "Unknown Salon") if salon else "Unknown Salon",
-                    "expert_name": expert.get("name", "Unknown Expert") if expert else "Unknown Expert",
-                    "date": appointment.appointment_date.strftime("%Y-%m-%d"),
-                    "time": appointment.appointment_time
-                }
-                
-                await twilio_service.send_appointment_confirmation(
-                    user["phone_number"],
-                    appointment_details
-                )
-        return appointment
+        return await get_appointment(appointment_id)
     return None
 
 async def get_upcoming_appointments(user_id: str) -> List[Appointment]:
     db = Database()
     current_time = datetime.utcnow()
     appointments = await db.appointments.find({
-        "user_id": user_id,
+        "user.user_id": user_id,
         "appointment_date": {"$gt": current_time},
         "status": "confirmed"
     }).to_list(length=None)
@@ -251,7 +260,7 @@ async def confirm_expert_appointment(appointment_id: str, expert_id: str) -> Opt
     if not appointment:
         raise HTTPException(status_code=404, detail="Appointment not found")
     
-    if appointment.expert_id != expert_id:
+    if not appointment.expert or appointment.expert.expert_id != expert_id:
         raise HTTPException(status_code=403, detail="Not authorized to confirm this appointment")
     
     update_result = await db.appointments.update_one(
@@ -263,7 +272,7 @@ async def confirm_expert_appointment(appointment_id: str, expert_id: str) -> Opt
         # Send notification to user
         notification_service = NotificationService(db)
         await notification_service.send_appointment_status_notification(
-            user_id=appointment.user_id,
+            user_id=appointment.user.user_id,
             appointment_id=appointment_id,
             status="expert_confirmed"
         )
@@ -298,37 +307,13 @@ async def complete_appointment(appointment_id: str, booking_service = None) -> O
         print(f"[DEBUG] Appointment status update result: {update_result.modified_count}")
         
         if update_result.modified_count:
-            # Get updated appointment
-            updated_appointment = await db.appointments.find_one({"appointment_id": appointment_id})
-            print(f"[DEBUG] Updated appointment: {updated_appointment}")
-            
-            # Get user's phone number
-            user = await db.users.find_one({"user_id": appointment["user_id"]})
-            print(f"[DEBUG] Found user: {user}")
-            
-            if user and "phone_number" in user:
-                # Set up review state before sending the review request
-                if booking_service:
-                    print(f"[DEBUG] Setting up review state for phone: {user['phone_number']}")
-                    await booking_service._setup_review_state(user["phone_number"], appointment_id)
-                
-                # Send review request
-                print("[DEBUG] Sending review request message")
-                twilio_service = TwilioService()
-                await twilio_service.send_sms(
-                    user["phone_number"],
-                    "Thank you for visiting us! We'd love to hear your feedback.\n\n"
-                    "Please rate your experience on a scale of 1-5 (5 being the best) "
-                    "and include any comments you have.\n\n"
-                    "Example: 5 - Great service, very professional!"
-                )
-                print("[DEBUG] Review request message sent")
-            
-            return Appointment(**updated_appointment)
+            # Send review request notification
+            if booking_service:
+                await booking_service.send_review_request(appointment_id)
+            return await get_appointment(appointment_id)
         return None
         
     except Exception as e:
-        print(f"[DEBUG] Error in complete_appointment: {str(e)}")
         logging.error(f"Error completing appointment: {str(e)}", exc_info=True)
         raise
 

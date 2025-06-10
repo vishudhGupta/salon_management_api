@@ -4,11 +4,11 @@ from services.twilio_service import TwilioService
 from crud.user_crud import get_user_by_phone, create_user, update_user, get_user
 from crud.salon_crud import get_salon, update_salon, get_all_salons, get_salon_services, get_salon_experts, get_expert_availability
 from crud.service_crud import get_service, get_all_services
-from crud.expert_crud import get_expert,get_expert_by_salon
+from crud.expert_crud import get_expert, get_expert_by_salon
 from crud.appointment_crud import create_appointment, update_appointment, get_appointment
 from schemas.user import UserCreate
 from schemas.salon import Appointment, TimeSlot
-from schemas.appointment import AppointmentCreate
+from schemas.appointment import AppointmentCreate, UserDetails, ExpertDetails, ServiceDetails
 from config.database import Database
 import re
 import httpx
@@ -993,11 +993,46 @@ class BookingService:
                             microsecond=0
                         )
 
+                        # Create user details
+                        user = await get_user(state["user_id"])
+                        user_details = UserDetails(
+                            user_id=user.user_id,
+                            name=user.name,
+                            email=user.email,
+                            phone_number=user.phone_number,
+                            address=user.address
+                        )
+
+                        # Create service details
+                        service = service_data["service"]
+                        service_details = ServiceDetails(
+                            service_id=service.service_id,
+                            name=service.name,
+                            description=service.description,
+                            cost=service.cost,
+                            duration=service.duration
+                        )
+
+                        # Get complete expert details from database
+                        expert = await get_expert(service_data["expert"]["expert_id"])
+                        if not expert:
+                            raise ValueError(f"Expert with ID {service_data['expert']['expert_id']} not found")
+
+                        # Create expert details with complete information
+                        expert_details = ExpertDetails(
+                            expert_id=expert.expert_id,
+                            name=expert.name,
+                            phone=expert.phone,
+                            address=expert.address,
+                            specialization=expert.specialization,
+                            experties=expert.experties
+                        )
+
                         appointment = AppointmentCreate(
-                            user_id=state["user_id"],
                             salon_id=service_data["salon"].salon_id,
-                            service_id=service_data["service"].service_id,
-                            expert_id=service_data["expert"]["expert_id"],
+                            user=user_details,
+                            service=service_details,
+                            expert=expert_details,
                             appointment_date=appointment_date,
                             appointment_time=slot.start_time.strftime("%I:%M %p")
                         )
@@ -1035,7 +1070,6 @@ class BookingService:
                     await self.twilio_service.send_sms(phone_number, confirmation_message)
                     self._reset_user_state(phone_number)
                     return {"status": "success", "message": "All bookings confirmed"}
-
 
                 except Exception as e:
                     error_msg = "Sorry, there was an error creating your appointments. Please try again by sending 'hi'."
@@ -1170,7 +1204,7 @@ class BookingService:
                 return
             
             # Get user's phone number
-            user = await get_user(appointment.user_id)
+            user = await get_user(appointment.user.user_id)
             if not user or not user.phone_number:
                 return
             
