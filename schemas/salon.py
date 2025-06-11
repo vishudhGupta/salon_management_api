@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, ConfigDict, field_validator
-from typing import List, Optional, Union, Dict
+from typing import List, Optional, Union, Dict, Any
 import re
 import random
 import string
@@ -105,3 +105,10 @@ def generate_salon_id(name: str) -> str:
     import random
     suffix = ''.join(random.choices('0123456789', k=3))
     return f"SALON{prefix}{suffix}"
+
+class SalonStatistics(BaseModel):
+    total_revenue: float
+    services_used: List[Dict[str, Any]]  # List of services with usage count
+    experts_used: List[Dict[str, Any]]   # List of experts with usage count
+    appointments: List[Appointment]       # List of appointments in the date range
+    canceled_appointments: List[Appointment]  # List of canceled appointments in the date range

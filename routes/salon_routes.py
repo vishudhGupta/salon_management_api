@@ -1,13 +1,14 @@
-from fastapi import APIRouter, HTTPException, Depends
-from typing import List, Dict
-from datetime import datetime
+from fastapi import APIRouter, HTTPException, Depends, Query
+from typing import List, Dict, Optional
+from datetime import datetime, timedelta
 from schemas.salon import (
     Salon, SalonCreate, TimeSlot,
-    ExpertAvailability, SalonUpdate
+    ExpertAvailability, SalonUpdate, SalonStatistics
 )
 from schemas.salon_dashbboard import SalonDashboard
-from crud import salon_crud, expert_crud, rating_crud
+from crud import salon_crud, expert_crud, rating_crud, appointment_crud
 from config.database import get_db, Database
+from collections import Counter
 
 
 router = APIRouter(
@@ -264,5 +265,24 @@ async def update_salon_ratings(
         updated_salon = await salon_crud.get_salon(salon_id)
         return updated_salon
 
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/{salon_id}/statistics", response_model=SalonStatistics)
+async def get_salon_statistics(
+    salon_id: str,
+    start_date: datetime = Query(..., description="Start date for statistics (required)"),
+    end_date: Optional[datetime] = Query(None, description="End date for statistics (optional)"),
+    db: Database = Depends(get_db)
+):
+    """
+    Get salon statistics including revenue, services used, and experts used within a date range.
+    If only start_date is provided, statistics will be for that single day.
+    """
+    try:
+        statistics = await salon_crud.get_salon_statistics(salon_id, start_date, end_date)
+        return SalonStatistics(**statistics)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) 

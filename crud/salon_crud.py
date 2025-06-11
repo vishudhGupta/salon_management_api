@@ -6,11 +6,15 @@ from schemas.salon import (
 from config.database import Database
 import logging
 from bson import ObjectId
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 from copy import deepcopy
 from scripts.time_parse import deserialize_time_slots
 from fastapi import HTTPException
 from crud.expert_crud import get_expert, get_experts_by_salon
+from crud.appointment_crud import get_salon_appointments
+from collections import Counter
+import re
+import random
 
 logger = logging.getLogger(__name__)
 def clean_object_ids(obj):
@@ -499,3 +503,119 @@ async def update_expert_availability(salon_id: str, expert_id: str, weekday: str
     except Exception as e:
         logger.error(f"Error updating expert availability: {str(e)}", exc_info=True)
         raise Exception(f"Error updating expert availability: {str(e)}")
+
+async def get_salon_statistics(salon_id: str, start_date: datetime, end_date: datetime) -> dict:
+    """
+    Get salon statistics including revenue, services used, and experts used within a date range.
+    If only start_date is provided, statistics will be for that single day.
+    """
+    try:
+        # Validate salon exists
+        salon = await get_salon(salon_id)
+        if not salon:
+            raise ValueError("Salon not found")
+
+        # Ensure timezone-aware datetimes
+        if start_date.tzinfo is None:
+            start_date = start_date.replace(tzinfo=timezone.utc)
+        if end_date and end_date.tzinfo is None:
+            end_date = end_date.replace(tzinfo=timezone.utc)
+
+        # Set end_date to start_date if not provided
+        if not end_date:
+            end_date = start_date + timedelta(days=1)
+        else:
+            end_date = end_date + timedelta(days=1)  # Include the end date
+        
+        # Get all salon appointments
+        all_appointments = await get_salon_appointments(salon_id)
+        
+        # Filter appointments by date range
+        appointments = [
+            apt for apt in all_appointments
+            if start_date <= apt.appointment_date.replace(tzinfo=timezone.utc) < end_date
+        ]
+
+        # Separate canceled appointments
+        canceled_appointments = [
+            apt for apt in appointments
+            if apt.status == "cancelled"
+        ]
+
+        # Filter out canceled appointments from main appointments list
+        appointments = [
+            apt for apt in appointments
+            if apt.status != "cancelled"
+        ]
+
+        # Calculate total revenue from completed appointments
+        total_revenue = sum(
+            apt.service.cost
+            for apt in appointments
+            if apt.status == "completed"
+        )
+
+        # Get services used
+        services_used = []
+        service_counter = Counter()
+        for apt in appointments:
+            if apt.status == "completed":
+                service_counter[apt.service.service_id] += 1
+
+        # Get service details and sort by usage
+        db = Database()
+        for service_id, count in service_counter.most_common():
+            service = await db.services.find_one({"service_id": service_id})
+            if service:
+                services_used.append({
+                    "service_id": service_id,
+                    "name": service.get("name"),
+                    "usage_count": count,
+                    "revenue": service.get("cost", 0) * count
+                })
+
+        # Get experts used
+        experts_used = []
+        expert_counter = Counter()
+        for apt in appointments:
+            if apt.status == "completed" and apt.expert:
+                expert_counter[apt.expert.expert_id] += 1
+
+        # Get expert details and sort by usage
+        for expert_id, count in expert_counter.most_common():
+            expert = await db.experts.find_one({"expert_id": expert_id})
+            if expert:
+                experts_used.append({
+                    "expert_id": expert_id,
+                    "name": expert.get("name"),
+                    "usage_count": count
+                })
+
+        # Transform appointments to match the schema
+        def transform_appointment(apt):
+            return {
+                "appointment_id": apt.appointment_id,
+                "user_id": apt.user.user_id,
+                "salon_id": apt.salon_id,
+                "service_id": apt.service.service_id,
+                "expert_id": apt.expert.expert_id if apt.expert else None,
+                "appointment_date": apt.appointment_date,
+                "appointment_time": apt.appointment_time,
+                "status": apt.status,
+                "created_at": apt.created_at
+            }
+
+        appointments_dict = [transform_appointment(apt) for apt in appointments]
+        canceled_appointments_dict = [transform_appointment(apt) for apt in canceled_appointments]
+
+        return {
+            "total_revenue": total_revenue,
+            "services_used": services_used,
+            "experts_used": experts_used,
+            "appointments": appointments_dict,
+            "canceled_appointments": canceled_appointments_dict
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting salon statistics: {str(e)}", exc_info=True)
+        raise

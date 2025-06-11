@@ -15,6 +15,7 @@ import httpx
 import logging
 import os
 from logging.handlers import RotatingFileHandler
+import uuid
 
 # Set up logging configuration
 def setup_logging():
@@ -1198,5 +1199,77 @@ class BookingService:
         except Exception as e:
             logging.error(f"Error handling appointment completion: {str(e)}", exc_info=True)
             raise
+
+    async def send_review_request(self, appointment_id: str) -> None:
+        """Send a review request to the user after appointment completion"""
+        try:
+            # Get appointment details
+            appointment = await get_appointment(appointment_id)
+            if not appointment:
+                logger.error(f"Appointment {appointment_id} not found for review request")
+                return
+
+            # Get user's phone number
+            user = await self.db.users.find_one({"user_id": appointment.user.user_id})
+            if not user or "phone_number" not in user:
+                logger.error(f"User not found or no phone number for appointment {appointment_id}")
+                return
+
+            # Set up review state for the user
+            await self._setup_review_state(user["phone_number"], appointment_id)
+
+            # Send review request message
+            message = (
+                "Thank you for choosing our salon! 🎉\n\n"
+                "We'd love to hear your feedback about your experience. "
+                "Please rate your service from 1-5 stars, followed by any comments (optional).\n\n"
+                "Example: '5 - Great service!' or just '5'"
+            )
+            await self.twilio_service.send_sms(user["phone_number"], message)
+
+        except Exception as e:
+            logger.error(f"Error sending review request: {str(e)}", exc_info=True)
+
+    async def handle_review_response(self, phone_number: str, rating: int, message: str):
+        """Handle user's review response"""
+        try:
+            # Get review state
+            review_state = await self.db.review_states.find_one({"phone_number": phone_number})
+            if not review_state:
+                raise ValueError("No review request found for this number")
+
+            # Get appointment details
+            appointment = await self.db.appointments.find_one({"appointment_id": review_state["appointment_id"]})
+            if not appointment:
+                raise ValueError("Appointment not found")
+
+            # Create review
+            review = {
+                "review_id": str(uuid.uuid4()),
+                "user_id": appointment["user_id"],  # Get user_id from appointment
+                "salon_id": appointment["salon_id"],
+                "appointment_id": appointment["appointment_id"],
+                "rating": rating,
+                "message": message,
+                "created_at": datetime.now()
+            }
+
+            # Save review
+            await self.db.reviews.insert_one(review)
+
+            # Delete review state
+            await self.db.review_states.delete_one({"phone_number": phone_number})
+
+            # Send thank you message
+            await self.send_whatsapp_message(
+                phone_number,
+                "Thank you for your feedback! We appreciate you taking the time to review our service."
+            )
+
+            return {"status": "success", "message": "Review saved successfully"}
+
+        except Exception as e:
+            logger.error(f"Error handling review response: {str(e)}", exc_info=True)
+            return {"status": "error", "message": str(e)}
 
    

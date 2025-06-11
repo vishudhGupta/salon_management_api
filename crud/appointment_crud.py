@@ -8,6 +8,10 @@ from services.twilio_service import TwilioService
 from crud.rating_crud import add_rating
 import logging
 import re
+import uuid
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 async def check_expert_availability(expert_id: str, appointment_date: datetime, appointment_time: str) -> bool:
     db = Database()
@@ -317,109 +321,62 @@ async def complete_appointment(appointment_id: str, booking_service = None) -> O
         logging.error(f"Error completing appointment: {str(e)}", exc_info=True)
         raise
 
-async def handle_review_response(appointment_id: str, review_message: str) -> Optional[Appointment]:
-    """Handle user's review response for a completed appointment"""
+async def handle_review_response(appointment_id: str, review_message: str):
+    """Handle user's review response"""
     try:
-        print(f"\n[DEBUG] Starting handle_review_response for appointment_id: {appointment_id}")
-        print(f"[DEBUG] Review message: {review_message}")
-        
         db = Database()
+        logger.debug(f"Starting handle_review_response for appointment_id: {appointment_id}")
+        logger.debug(f"Review message: {review_message}")
         
-        # Get the appointment
+        # Get appointment details
         appointment = await db.appointments.find_one({"appointment_id": appointment_id})
         if not appointment:
-            print("[DEBUG] Appointment not found")
-            return None
+            raise ValueError("Appointment not found")
             
-        print(f"[DEBUG] Found appointment: {appointment}")
+        logger.debug(f"Found appointment: {appointment}")
             
-        # Get user's phone number
-        user = await db.users.find_one({"user_id": appointment["user_id"]})
-        if not user or "phone_number" not in user:
-            print("[DEBUG] User not found or no phone number")
-            return None
+        # Get user details from the nested user object
+        user = await db.users.find_one({"user_id": appointment["user"]["user_id"]})
+        if not user:
+            raise ValueError("User not found")
 
-        print(f"[DEBUG] Found user: {user}")
-        twilio_service = TwilioService()
-        
+        # Parse the review message to extract rating and comment
         try:
-            # Parse message - handle both formats:
-            # 1. Just rating: "5"
-            # 2. Rating with comment: "5 - Great service" or "5-Great service"
-            rating = None
-            comment = ""
-            
-            print("[DEBUG] Attempting to parse review message")
-            
             # First try to parse as just a number
-            try:
-                rating = int(review_message.strip())
-                if rating < 1 or rating > 5:
-                    raise ValueError("Rating must be between 1 and 5")
-                print(f"[DEBUG] Parsed rating as number: {rating}")
-            except ValueError:
-                # If not a number, try to parse as "rating - comment" format
-                print("[DEBUG] Not a number, trying to parse as 'rating - comment' format")
-                parts = review_message.replace(" - ", "-").split('-', 1)
-                if len(parts) >= 1:
-                    try:
-                        rating = int(parts[0].strip())
-                        if rating < 1 or rating > 5:
-                            raise ValueError("Rating must be between 1 and 5")
-                        if len(parts) == 2:
-                            comment = parts[1].strip()
-                        print(f"[DEBUG] Parsed rating: {rating}, comment: {comment}")
-                    except ValueError:
-                        print("[DEBUG] Failed to parse rating from parts")
-                        await twilio_service.send_sms(
-                            user["phone_number"],
-                            "Please provide a rating between 1-5, followed by your comments (optional)."
-                        )
-                        return None
+            rating = int(review_message.strip())
+            comment = ""
+        except ValueError:
+            # If not a number, try to parse as "rating - comment" format
+            parts = review_message.replace(" - ", "-").split('-', 1)
+            if len(parts) >= 1:
+                try:
+                    rating = int(parts[0].strip())
+                    comment = parts[1].strip() if len(parts) == 2 else ""
+                except ValueError:
+                    raise ValueError("Please provide a rating between 1-5, followed by your comments (optional).")
+            else:
+                raise ValueError("Please provide a rating between 1-5, followed by your comments (optional).")
 
-            if rating is None:
-                print("[DEBUG] Rating is None after parsing attempts")
-                await twilio_service.send_sms(
-                    user["phone_number"],
-                    "Please provide a rating between 1-5, followed by your comments (optional)."
-                )
-                return None
+        if rating < 1 or rating > 5:
+            raise ValueError("Rating must be between 1 and 5")
 
-            # Update the salon rating
-            try:
-                print(f"[DEBUG] Calling add_rating with salon_id: {appointment['salon_id']}, user_id: {appointment['user_id']}, rating: {rating}")
-                await add_rating(
-                    salon_id=appointment["salon_id"],
-                    user_id=appointment["user_id"],
-                    rating=rating,
-                    comment=comment
-                )
-                print("[DEBUG] Successfully updated rating")
-                
-                # Send thank you message
-                await twilio_service.send_sms(
-                    user["phone_number"],
-                    "Thank you for your feedback! We appreciate your input. 😊\n\nSend 'hi' to book another service."
-                )
-                print("[DEBUG] Thank you message sent")
-            except Exception as e:
-                print(f"[DEBUG] Error updating salon rating: {str(e)}")
-                logging.error(f"Error updating salon rating: {str(e)}")
-                await twilio_service.send_sms(
-                    user["phone_number"],
-                    "Sorry, there was an error saving your feedback."
-                )
-        except Exception as e:
-            print(f"[DEBUG] Error handling review response: {str(e)}")
-            logging.error(f"Error handling review response: {str(e)}", exc_info=True)
-            await twilio_service.send_sms(
-                user["phone_number"],
-                "Sorry, something went wrong processing your feedback."
-            )
+        # Update the salon rating using the existing add_rating function
+        await add_rating(
+            salon_id=appointment["salon_id"],
+            user_id=user["user_id"],
+            rating=rating,
+            comment=comment
+        )
+
+        # Send thank you message
+        twilio_service = TwilioService()
+        await twilio_service.send_sms(
+            user["phone_number"],
+            "Thank you for your feedback! We appreciate your input. 😊\n\nSend 'hi' to book another service."
+        )
         
-        return Appointment(**appointment)
+        return {"status": "success", "message": "Review saved successfully"}
         
     except Exception as e:
-        print(f"[DEBUG] Error in handle_review_response: {str(e)}")
-        logging.error(f"Error handling review response: {str(e)}", exc_info=True)
+        logger.error(f"Error in handle_review_response: {str(e)}", exc_info=True)
         raise 
