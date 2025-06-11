@@ -515,57 +515,54 @@ async def get_salon_statistics(salon_id: str, start_date: datetime, end_date: da
         if not salon:
             raise ValueError("Salon not found")
 
-        # Ensure timezone-aware datetimes
-        if start_date.tzinfo is None:
-            start_date = start_date.replace(tzinfo=timezone.utc)
-        if end_date and end_date.tzinfo is None:
-            end_date = end_date.replace(tzinfo=timezone.utc)
+        # Convert input dates to naive UTC for MongoDB
+        if start_date.tzinfo is not None:
+            start_date = start_date.astimezone(timezone.utc).replace(tzinfo=None)
+        if end_date and end_date.tzinfo is not None:
+            end_date = end_date.astimezone(timezone.utc).replace(tzinfo=None)
 
         # Set end_date to start_date if not provided
         if not end_date:
             end_date = start_date + timedelta(days=1)
         else:
             end_date = end_date + timedelta(days=1)  # Include the end date
-        
-        # Get all salon appointments
-        all_appointments = await get_salon_appointments(salon_id)
-        
-        # Filter appointments by date range
-        appointments = [
-            apt for apt in all_appointments
-            if start_date <= apt.appointment_date.replace(tzinfo=timezone.utc) < end_date
-        ]
+
+        # Database-side filtering for appointments
+        db = Database()
+        appointments = await db.appointments.find({
+            "salon_id": salon_id,
+            "appointment_date": {
+                "$gte": start_date,
+                "$lt": end_date
+            }
+        }).to_list(None)
 
         # Separate canceled appointments
-        canceled_appointments = [
-            apt for apt in appointments
-            if apt.status == "cancelled"
-        ]
-
-        # Filter out canceled appointments from main appointments list
-        appointments = [
-            apt for apt in appointments
-            if apt.status != "cancelled"
-        ]
+        canceled_appointments = [apt for apt in appointments if apt["status"] == "cancelled"]
+        appointments = [apt for apt in appointments if apt["status"] != "cancelled"]
 
         # Calculate total revenue from completed appointments
         total_revenue = sum(
-            apt.service.cost
+            apt["service"]["cost"]
             for apt in appointments
-            if apt.status == "completed"
+            if apt["status"] == "completed"
         )
 
-        # Get services used
-        services_used = []
+        # Get services used with counter
         service_counter = Counter()
         for apt in appointments:
-            if apt.status == "completed":
-                service_counter[apt.service.service_id] += 1
+            if apt["status"] == "completed":
+                service_counter[apt["service"]["service_id"]] += 1
 
-        # Get service details and sort by usage
-        db = Database()
+        # Batch fetch all services
+        service_ids = list(service_counter.keys())
+        services = await db.services.find({"service_id": {"$in": service_ids}}).to_list(None)
+        services_dict = {s["service_id"]: s for s in services}
+
+        # Create services_used list
+        services_used = []
         for service_id, count in service_counter.most_common():
-            service = await db.services.find_one({"service_id": service_id})
+            service = services_dict.get(service_id)
             if service:
                 services_used.append({
                     "service_id": service_id,
@@ -574,16 +571,21 @@ async def get_salon_statistics(salon_id: str, start_date: datetime, end_date: da
                     "revenue": service.get("cost", 0) * count
                 })
 
-        # Get experts used
-        experts_used = []
+        # Get experts used with counter
         expert_counter = Counter()
         for apt in appointments:
-            if apt.status == "completed" and apt.expert:
-                expert_counter[apt.expert.expert_id] += 1
+            if apt["status"] == "completed" and apt.get("expert"):
+                expert_counter[apt["expert"]["expert_id"]] += 1
 
-        # Get expert details and sort by usage
+        # Batch fetch all experts
+        expert_ids = list(expert_counter.keys())
+        experts = await db.experts.find({"expert_id": {"$in": expert_ids}}).to_list(None)
+        experts_dict = {e["expert_id"]: e for e in experts}
+
+        # Create experts_used list
+        experts_used = []
         for expert_id, count in expert_counter.most_common():
-            expert = await db.experts.find_one({"expert_id": expert_id})
+            expert = experts_dict.get(expert_id)
             if expert:
                 experts_used.append({
                     "expert_id": expert_id,
@@ -594,15 +596,15 @@ async def get_salon_statistics(salon_id: str, start_date: datetime, end_date: da
         # Transform appointments to match the schema
         def transform_appointment(apt):
             return {
-                "appointment_id": apt.appointment_id,
-                "user_id": apt.user.user_id,
-                "salon_id": apt.salon_id,
-                "service_id": apt.service.service_id,
-                "expert_id": apt.expert.expert_id if apt.expert else None,
-                "appointment_date": apt.appointment_date,
-                "appointment_time": apt.appointment_time,
-                "status": apt.status,
-                "created_at": apt.created_at
+                "appointment_id": apt["appointment_id"],
+                "user_id": apt["user"]["user_id"],
+                "salon_id": apt["salon_id"],
+                "service_id": apt["service"]["service_id"],
+                "expert_id": apt["expert"]["expert_id"] if apt.get("expert") else None,
+                "appointment_date": apt["appointment_date"],
+                "appointment_time": apt["appointment_time"],
+                "status": apt["status"],
+                "created_at": apt["created_at"]
             }
 
         appointments_dict = [transform_appointment(apt) for apt in appointments]
